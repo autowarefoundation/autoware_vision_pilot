@@ -9,8 +9,8 @@
 // Visualization helper - draws detections and tracked objects with IDs and CIPO indicator
 void drawTrackedObjects(cv::Mat& frame,
                         const std::vector<autoware_pov::vision::autospeed::Detection>& detections,
-                        const std::vector<autoware_pov::vision::TrackedObject>& tracked_objects,
-                        const autoware_pov::vision::CIPOInfo& cipo,
+                        const std::vector<autoware_pov::vision::tracking::TrackedObject>& tracked_objects,
+                        const autoware_pov::vision::tracking::CIPOInfo& cipo,
                         bool cut_in_detected = false,
                         bool kalman_reset = false);
 
