@@ -4,7 +4,7 @@
 #include <opencv2/features2d.hpp>
 #include <vector>
 
-namespace autoware_pov::vision {
+namespace autoware_pov::vision::tracking {
 
 /**
  * @brief Feature extraction and matching utilities for object identity verification

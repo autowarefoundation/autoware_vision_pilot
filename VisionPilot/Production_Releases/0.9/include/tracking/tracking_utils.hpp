@@ -3,7 +3,7 @@
 #include <opencv2/opencv.hpp>
 #include <vector>
 
-namespace autoware_pov::vision {
+namespace autoware_pov::vision::tracking {
 
 /**
  * @brief Utility functions for object tracking and data association
@@ -73,5 +73,5 @@ public:
     );
 };
 
-}  // namespace autoware_pov::vision
+}  // namespace autoware_pov::vision::tracking
 

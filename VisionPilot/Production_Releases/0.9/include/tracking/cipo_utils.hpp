@@ -4,7 +4,7 @@
 #include <limits>
 #include "object_finder.hpp"
 
-namespace autoware_pov::vision {
+namespace autoware_pov::vision::tracking {
 
 /**
  * @brief Helper utilities for CIPO selection logic
@@ -34,5 +34,5 @@ public:
                              int level2_idx);
 };
 
-} // namespace autoware_pov::vision
+} // namespace autoware_pov::vision::tracking
 

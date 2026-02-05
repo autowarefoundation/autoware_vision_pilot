@@ -11,7 +11,7 @@
 #include "cipo_history.hpp"
 #include "feature_matching_utils.hpp"
 
-namespace autoware_pov::vision {
+namespace autoware_pov::vision::tracking {
 
 /**
  * @brief Tracked object with Kalman-filtered position and velocity
@@ -236,6 +236,6 @@ private:
     bool kalman_reset_;           // True if Kalman filter was reset
 };
 
-}  // namespace autoware_pov::vision
+}  // namespace autoware_pov::vision::tracking
 
 #endif  // OBJECT_FINDER_HPP

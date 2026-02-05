@@ -4,7 +4,7 @@
 #include <deque>
 #include <chrono>
 
-namespace autoware_pov::vision {
+namespace autoware_pov::vision::tracking {
 
 /**
  * @brief Stores information about CIPO at a specific frame
@@ -92,5 +92,5 @@ private:
     size_t max_size_;                   // Maximum buffer size
 };
 
-}  // namespace autoware_pov::vision
+}  // namespace autoware_pov::vision::tracking
 
