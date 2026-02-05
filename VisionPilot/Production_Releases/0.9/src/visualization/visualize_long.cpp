@@ -10,7 +10,7 @@
 #include "../../include/tracking/object_finder.hpp"
 #include "../../include/inference/autospeed/onnxruntime_engine.hpp"
 
-using namespace autoware_pov::vision;
+using namespace autoware_pov::vision::tracking;
 using namespace autoware_pov::vision::autospeed;
 
 void drawTrackedObjects(cv::Mat& frame,
