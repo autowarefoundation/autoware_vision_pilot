@@ -2,7 +2,7 @@
 #include "../../include/tracking/logging.hpp"
 #include <algorithm>
 
-namespace autoware_pov::vision {
+namespace autoware_pov::vision::tracking {
 
 cv::Ptr<cv::ORB> FeatureMatchingUtils::getORBDetector() {
     // Static detector - created once and reused
@@ -152,5 +152,5 @@ bool FeatureMatchingUtils::areSameObject(const cv::Mat& frame1,
     return confidence >= confidence_threshold;
 }
 
-}  // namespace autoware_pov::vision
+}  // namespace autoware_pov::vision::tracking
 

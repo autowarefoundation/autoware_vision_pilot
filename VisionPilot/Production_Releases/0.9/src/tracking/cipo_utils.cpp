@@ -1,7 +1,7 @@
 #include "../../include/tracking/cipo_utils.hpp"
 #include <limits>
 
-namespace autoware_pov::vision {
+namespace autoware_pov::vision::tracking {
 
 int CIPOUtils::findClosestByLevel(const std::vector<TrackedObject>& tracked_objects, 
                                    int class_id) {
@@ -40,5 +40,5 @@ int CIPOUtils::selectMainCIPO(const std::vector<TrackedObject>& tracked_objects,
     return (dist1 <= dist2) ? level1_idx : level2_idx;
 }
 
-} // namespace autoware_pov::vision
+} // namespace autoware_pov::vision::tracking
 

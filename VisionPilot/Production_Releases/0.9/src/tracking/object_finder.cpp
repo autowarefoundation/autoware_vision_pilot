@@ -6,7 +6,7 @@
 #include <cmath>
 #include <limits>
 
-namespace autoware_pov::vision {
+namespace autoware_pov::vision::tracking {
 
 ObjectFinder::ObjectFinder(const std::string& homography_yaml,
                            int image_width,
@@ -435,4 +435,4 @@ TrackingResult ObjectFinder::updateAndGetCIPO(
     return result;
 }
 
-}  // namespace autoware_pov::vision
+}  // namespace autoware_pov::vision::tracking

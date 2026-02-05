@@ -1,6 +1,6 @@
 #include "../../include/tracking/cipo_history.hpp"
 
-namespace autoware_pov::vision {
+namespace autoware_pov::vision::tracking {
 
 CIPOHistory::CIPOHistory(size_t max_history_size) 
     : max_size_(max_history_size) {
@@ -47,5 +47,5 @@ void CIPOHistory::clear() {
     history_.clear();
 }
 
-}  // namespace autoware_pov::vision
+}  // namespace autoware_pov::vision::tracking
 

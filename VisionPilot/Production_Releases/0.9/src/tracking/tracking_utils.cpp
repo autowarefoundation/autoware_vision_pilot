@@ -2,7 +2,7 @@
 #include <algorithm>
 #include <cmath>
 
-namespace autoware_pov::vision {
+namespace autoware_pov::vision::tracking {
 
 float TrackingUtils::calculateIoU(const cv::Rect& a, const cv::Rect& b) {
     // Calculate intersection rectangle
@@ -87,5 +87,5 @@ float TrackingUtils::calculateMatchingScore(
     return matching_score;
 }
 
-}  // namespace autoware_pov::vision
+}  // namespace autoware_pov::vision::tracking
 
