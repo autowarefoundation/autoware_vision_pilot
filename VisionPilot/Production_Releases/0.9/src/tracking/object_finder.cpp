@@ -1,6 +1,6 @@
-#include "../../include/tracking/object_finder.hpp"
-#include "../../include/tracking/cipo_utils.hpp"
-#include "../../include/tracking/logging.hpp"
+#include "tracking/object_finder.hpp"
+#include "tracking/cipo_utils.hpp"
+#include "tracking/logging.hpp"
 #include <yaml-cpp/yaml.h>
 #include <algorithm>
 #include <cmath>
