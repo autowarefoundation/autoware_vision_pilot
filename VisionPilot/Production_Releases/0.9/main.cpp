@@ -1,4 +1,4 @@
-/**
+ /**
  * @file main.cpp
  * @brief Multi-threaded EgoLanes lane detection inference pipeline
  * 
@@ -26,6 +26,7 @@ using AutoSteerEngine =
   autoware_pov::vision::egolanes::AutoSteerOnnxEngine;
 #endif
 #include "visualization/visualize.hpp"
+#include "visualization/visualize_long.hpp"
 #include "lane_filtering/lane_filter.hpp"
 #include "lane_tracking/lane_tracking.hpp"
 #include "camera/camera_utils.hpp"
@@ -34,6 +35,11 @@ using AutoSteerEngine =
 #include "steering_control/steering_filter.hpp"
 #include "drivers/can_interface.hpp"
 #include "config/config_reader.hpp"
+
+// Longitudinal tracking includes
+#include "inference/autospeed/onnxruntime_engine.hpp"
+#include "tracking/object_finder.hpp"
+
 #ifdef ENABLE_RERUN
 #include "rerun/rerun_logger.hpp"
 #endif
@@ -62,6 +68,8 @@ using namespace autoware_pov::vision::egolanes;
 using namespace autoware_pov::vision::camera;
 using namespace autoware_pov::vision::path_planning;
 using namespace autoware_pov::vision::steering_control;
+using namespace autoware_pov::vision::tracking;
+using namespace autoware_pov::vision::autospeed;
 using namespace autoware_pov::drivers;
 using namespace autoware_pov::config;
 using namespace std::chrono;
@@ -151,6 +159,19 @@ struct InferenceResult {
     bool autosteer_valid = false;  // Whether AutoSteer ran (skips first frame)
     bool lane_departure_warning = false; // Whether the vehicle is drifting outside the driving corridor
     CanVehicleState vehicle_state; // CAN bus data from capture thread
+};
+
+// Longitudinal tracking result (for parallel execution without sync)
+struct LongitudinalResult {
+    cv::Mat frame;
+    std::vector<TrackedObject> tracked_objects;
+    CIPOInfo cipo;
+    int frame_number;
+    steady_clock::time_point capture_time;
+    steady_clock::time_point inference_time;
+    bool cut_in_detected = false;
+    bool kalman_reset = false;
+    CanVehicleState vehicle_state;
 };
 
 // Performance metrics
@@ -496,6 +517,79 @@ void lateralInferenceThread(
 }
 
 /**
+ * @brief Longitudinal inference thread - runs AutoSpeed detection + ObjectFinder tracking
+ */
+void longitudinalInferenceThread(
+    AutoSpeedOnnxEngine& autospeed_engine,
+    ObjectFinder& object_finder,
+    ThreadSafeQueue<TimestampedFrame>& input_queue,
+    ThreadSafeQueue<LongitudinalResult>& output_queue,
+    PerformanceMetrics& metrics,
+    std::atomic<bool>& running,
+    float conf_thresh,
+    float iou_thresh
+)
+{
+    while (running.load()) {
+        TimestampedFrame tf = input_queue.pop();
+        if (tf.frame.empty()) continue;
+
+        auto t_inference_start = steady_clock::now();
+
+        // 1. Run AutoSpeed detection
+        std::vector<Detection> detections = autospeed_engine.inference(
+            tf.frame, 
+            conf_thresh, 
+            iou_thresh
+        );
+
+        // 2. Run ObjectFinder tracking and get CIPO
+        TrackingResult tracking_result = object_finder.updateAndGetCIPO(detections, tf.frame);
+
+        auto t_inference_end = steady_clock::now();
+
+        // Calculate inference latency
+        long inference_us = duration_cast<microseconds>(
+            t_inference_end - t_inference_start).count();
+        metrics.total_inference_us.fetch_add(inference_us);
+
+        // Log tracking summary
+        if (tracking_result.cipo.exists) {
+            std::cout << "[Longitudinal Frame " << tf.frame_number << "] "
+                      << "CIPO: Track " << tracking_result.cipo.track_id 
+                      << " (Class " << tracking_result.cipo.class_id << ") "
+                      << "@ " << std::fixed << std::setprecision(1) 
+                      << tracking_result.cipo.distance_m << "m, "
+                      << tracking_result.cipo.velocity_ms << "m/s";
+            
+            if (tracking_result.cut_in_detected) {
+                std::cout << " [CUT-IN DETECTED]";
+            }
+            if (tracking_result.kalman_reset) {
+                std::cout << " [KALMAN RESET]";
+            }
+            std::cout << std::endl;
+        }
+
+        // Package result
+        LongitudinalResult result;
+        result.frame = tf.frame.clone();
+        result.tracked_objects = tracking_result.tracked_objects;
+        result.cipo = tracking_result.cipo;
+        result.frame_number = tf.frame_number;
+        result.capture_time = tf.timestamp;
+        result.inference_time = t_inference_end;
+        result.cut_in_detected = tracking_result.cut_in_detected;
+        result.kalman_reset = tracking_result.kalman_reset;
+        result.vehicle_state = tf.vehicle_state;
+        
+        output_queue.push(result);
+    }
+
+    output_queue.stop();
+}
+
+/**
  * @brief Display thread - handles visualization and video saving
  */
 void displayThread(
@@ -791,6 +885,123 @@ void displayThread(
     }
 }
 
+/**
+ * @brief Longitudinal display thread - handles visualization of tracking results
+ */
+void longitudinalDisplayThread(
+    ThreadSafeQueue<LongitudinalResult>& queue,
+    PerformanceMetrics& metrics,
+    std::atomic<bool>& running,
+    bool enable_viz,
+    bool save_video,
+    const std::string& output_video_path
+)
+{
+    // Visualization setup
+    int window_width = 1920;
+    int window_height = 1280;
+    
+    if (enable_viz) {
+        cv::namedWindow("Longitudinal Tracking", cv::WINDOW_NORMAL);
+        cv::resizeWindow("Longitudinal Tracking", window_width, window_height);
+    }
+
+    // Video writer setup
+    cv::VideoWriter video_writer;
+    bool video_writer_initialized = false;
+
+    if (save_video && enable_viz) {
+        std::cout << "Longitudinal video saving enabled. Output: " << output_video_path << std::endl;
+    }
+
+    while (running.load()) {
+        LongitudinalResult result;
+        if (!queue.try_pop(result)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+
+        auto t_display_start = steady_clock::now();
+
+        // Prepare visualization frame
+        cv::Mat vis_frame = result.frame.clone();
+        
+        // Draw tracked objects and CIPO
+        drawTrackedObjects(vis_frame, result.tracked_objects, result.cipo);
+
+        // Display warnings for events
+        if (result.cut_in_detected) {
+            cv::putText(vis_frame, "CUT-IN DETECTED!", 
+                       cv::Point(50, 100), 
+                       cv::FONT_HERSHEY_BOLD, 
+                       2.0, 
+                       cv::Scalar(0, 0, 255), 
+                       3);
+        }
+        
+        if (result.kalman_reset) {
+            cv::putText(vis_frame, "KALMAN RESET", 
+                       cv::Point(50, 150), 
+                       cv::FONT_HERSHEY_SIMPLEX, 
+                       1.5, 
+                       cv::Scalar(0, 165, 255), 
+                       3);
+        }
+
+        if (enable_viz) {
+            cv::imshow("Longitudinal Tracking", vis_frame);
+            
+            // Initialize video writer on first frame
+            if (save_video && !video_writer_initialized) {
+                int fourcc = cv::VideoWriter::fourcc('a', 'v', 'c', '1');  // H.264
+                video_writer.open(
+                    output_video_path,
+                    fourcc,
+                    10.0,
+                    vis_frame.size(),
+                    true
+                );
+                
+                if (video_writer.isOpened()) {
+                    std::cout << "Longitudinal video writer initialized (H.264): " 
+                             << vis_frame.cols << "x" << vis_frame.rows 
+                             << " @ 10 fps" << std::endl;
+                    video_writer_initialized = true;
+                } else {
+                    std::cerr << "Failed to initialize longitudinal video writer" << std::endl;
+                    save_video = false;
+                }
+            }
+            
+            // Write frame if enabled
+            if (save_video && video_writer_initialized) {
+                video_writer.write(vis_frame);
+            }
+            
+            // Press 'q' to quit
+            int key = cv::waitKey(1);
+            if (key == 'q' || key == 27) {
+                running.store(false);
+            }
+        }
+
+        auto t_display_end = steady_clock::now();
+        long display_us = duration_cast<microseconds>(
+            t_display_end - t_display_start).count();
+        metrics.total_display_us.fetch_add(display_us);
+    }
+
+    // Cleanup
+    if (save_video && video_writer_initialized && video_writer.isOpened()) {
+        video_writer.release();
+        std::cout << "\nLongitudinal video saved to: " << output_video_path << std::endl;
+    }
+
+    if (enable_viz) {
+        cv::destroyWindow("Longitudinal Tracking");
+    }
+}
+
 int main(int argc, char** argv)
 {
     std::string config_path = (argc >= 2) ? argv[1] : "/usr/share/visionpilot/visionpilot.conf";
@@ -1013,6 +1224,71 @@ int main(int argc, char** argv)
     std::cout << "  - Output: Steering angle (degrees, -30 to +30)" << std::endl;
     std::cout << "  - Note: First frame will be skipped (requires temporal buffer)\n" << std::endl;
 
+    // ========================================
+    // LONGITUDINAL PIPELINE INITIALIZATION
+    // ========================================
+    
+    // Load longitudinal config (using same provider/precision as lateral for now)
+    std::string autospeed_model_path = config.models.autospeed_path;
+    std::string homography_yaml_path = config.models.homography_yaml_path;
+    float autospeed_conf_thresh = 0.5f;  // TODO: Add to config
+    float autospeed_iou_thresh = 0.5f;   // TODO: Add to config
+    
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "LONGITUDINAL PIPELINE INITIALIZATION" << std::endl;
+    std::cout << "========================================" << std::endl;
+    
+    // Initialize AutoSpeed detection engine
+    std::cout << "\nLoading AutoSpeed model: " << autospeed_model_path << std::endl;
+    std::cout << "Provider: " << provider << " | Precision: " << precision << std::endl;
+    
+    std::unique_ptr<AutoSpeedOnnxEngine> autospeed_engine = std::make_unique<AutoSpeedOnnxEngine>(
+        autospeed_model_path, 
+        provider, 
+        precision, 
+        device_id, 
+        cache_dir
+    );
+    
+    // Warm-up AutoSpeed inference
+    if (provider == "tensorrt") {
+        std::cout << "Running AutoSpeed warm-up inference to build TensorRT engine..." << std::endl;
+        std::cout << "This may take 20-60 seconds on first run. Please wait...\n" << std::endl;
+        
+        auto autospeed_warmup_start = std::chrono::steady_clock::now();
+        cv::Mat dummy_frame_as(1280, 1920, CV_8UC3, cv::Scalar(128, 128, 128));
+        std::vector<Detection> warmup_dets = autospeed_engine->inference(dummy_frame_as, autospeed_conf_thresh, autospeed_iou_thresh);
+        auto autospeed_warmup_end = std::chrono::steady_clock::now();
+        double autospeed_warmup_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+            autospeed_warmup_end - autospeed_warmup_start).count() / 1000.0;
+        
+        std::cout << "AutoSpeed warm-up complete! (took " << std::fixed << std::setprecision(1) 
+                  << autospeed_warmup_time << "s)" << std::endl;
+        std::cout << "TensorRT engine is now cached and ready.\n" << std::endl;
+    }
+    
+    std::cout << "AutoSpeed initialized (vehicle detection)" << std::endl;
+    std::cout << "  - Input: Full frame [1280x1920]" << std::endl;
+    std::cout << "  - Output: Bounding boxes (class 1=CIPO L1, class 2=CIPO L2)" << std::endl;
+    
+    // Initialize ObjectFinder (multi-object tracker)
+    std::cout << "\nLoading homography calibration: " << homography_yaml_path << std::endl;
+    std::unique_ptr<ObjectFinder> object_finder = std::make_unique<ObjectFinder>(
+        homography_yaml_path,
+        1920,  // image width
+        1280,  // image height
+        false  // debug mode off
+    );
+    
+    std::cout << "ObjectFinder initialized (multi-object tracking + CIPO selection)" << std::endl;
+    std::cout << "  - Tracks: Class 1 (CIPO Level 1) and Class 2 (CIPO Level 2)" << std::endl;
+    std::cout << "  - Kalman Filter: 2D (position, velocity)" << std::endl;
+    std::cout << "  - Data Association: IoU + Centroid + Size" << std::endl;
+    std::cout << "  - Feature Matching: ORB for cut-in detection" << std::endl;
+    std::cout << "  - CIPO Selection: Closest object (considers both L1 and L2)\n" << std::endl;
+    
+    std::cout << "========================================\n" << std::endl;
+
     // Initialize CAN Interface (optional - ground truth)
     std::unique_ptr<CanInterface> can_interface;
     if (!can_interface_name.empty()) {
@@ -1028,6 +1304,10 @@ int main(int argc, char** argv)
     // Thread-safe queues with bounded size (prevents memory overflow)
     ThreadSafeQueue<TimestampedFrame> capture_queue(5);   // Max 5 frames waiting for inference
     ThreadSafeQueue<InferenceResult> display_queue(5);    // Max 5 frames waiting for display
+    
+    // Longitudinal pipeline queues (separate from lateral, parallel execution)
+    ThreadSafeQueue<TimestampedFrame> capture_queue_long(5);   // Longitudinal capture queue
+    ThreadSafeQueue<LongitudinalResult> display_queue_long(5); // Longitudinal display queue
 
     // Performance metrics
     PerformanceMetrics metrics;
@@ -1049,6 +1329,7 @@ int main(int argc, char** argv)
     std::cout << "PathFinder: ENABLED (polynomial fitting + Bayes filter)" << std::endl;
     std::cout << "Steering Control: ENABLED" << std::endl;
     std::cout << "AutoSteer: ENABLED (temporal steering prediction)" << std::endl;
+    std::cout << "Longitudinal Tracking: ENABLED (AutoSpeed + ObjectFinder) - PARALLEL MODE" << std::endl;
     if (can_interface) {
         std::cout << "CAN Interface: ENABLED (Ground Truth)" << std::endl;
     }
@@ -1057,15 +1338,18 @@ int main(int argc, char** argv)
     }
     if (save_video && enable_viz) {
         std::cout << "Video saving: ENABLED -> " << output_video_path << std::endl;
+        std::cout << "Longitudinal video: ENABLED -> " << output_video_path + ".long.mp4" << std::endl;
     }
     if (enable_viz) {
-        std::cout << "Press 'q' in the video window to quit" << std::endl;
+        std::cout << "Press 'q' in any video window to quit" << std::endl;
     } else {
         std::cout << "Running in headless mode" << std::endl;
         std::cout << "Press Ctrl+C to quit" << std::endl;
     }
+    std::cout << "\nNOTE: Lateral and Longitudinal pipelines running in PARALLEL (unsynchronized for now)" << std::endl;
     std::cout << "========================================\n" << std::endl;
 
+    // Launch threads (lateral pipeline)
     std::thread t_capture(captureThread, source, is_camera, std::ref(capture_queue),
                           std::ref(metrics), std::ref(running), can_interface.get());
     std::thread t_lateral_inference(lateralInferenceThread, std::ref(engine),
@@ -1083,10 +1367,34 @@ int main(int argc, char** argv)
                           std::ref(running), enable_viz, save_video, output_video_path, csv_log_path);
 #endif
 
-    // Wait for threads
+    // Launch threads (longitudinal pipeline - parallel, separate capture)
+    std::thread t_capture_long(captureThread, source, is_camera, std::ref(capture_queue_long),
+                               std::ref(metrics), std::ref(running), can_interface.get());
+    std::thread t_longitudinal_inference(longitudinalInferenceThread, 
+                                        std::ref(*autospeed_engine),
+                                        std::ref(*object_finder),
+                                        std::ref(capture_queue_long), 
+                                        std::ref(display_queue_long),
+                                        std::ref(metrics), 
+                                        std::ref(running),
+                                        autospeed_conf_thresh,
+                                        autospeed_iou_thresh);
+    std::thread t_display_long(longitudinalDisplayThread, 
+                              std::ref(display_queue_long), 
+                              std::ref(metrics),
+                              std::ref(running), 
+                              enable_viz, 
+                              save_video, 
+                              output_video_path + ".long.mp4");
+
+    // Wait for threads (both pipelines)
     t_capture.join();
     t_lateral_inference.join();
     t_display.join();
+    
+    t_capture_long.join();
+    t_longitudinal_inference.join();
+    t_display_long.join();
 
     std::cout << "\nInference pipeline stopped." << std::endl;
 
