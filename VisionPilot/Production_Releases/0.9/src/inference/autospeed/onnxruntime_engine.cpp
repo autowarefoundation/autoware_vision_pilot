@@ -1,6 +1,6 @@
-#include "onnxruntime_engine.hpp"
-#include "onnxruntime_session.hpp"
-#include "logging.hpp"
+#include "inference/autospeed/onnxruntime_engine.hpp"
+#include "inference/autospeed/onnxruntime_session.hpp"
+#include "tracking/logging.hpp"
 #include <algorithm>
 #include <numeric>
 #include <stdexcept>
