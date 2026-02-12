@@ -230,11 +230,16 @@ std::vector<cv::Point2f> transformPixelsToMeters(const std::vector<cv::Point2f>&
 
 /**
  * @brief Unified capture thread - handles both video files and cameras
+ * @param queue_lateral Output queue for lateral pipeline
+ * @param queue_longitudinal Output queue for longitudinal pipeline (optional, can be nullptr)
+ * 
+ * Broadcasts frames to both lateral and longitudinal queues for parallel processing
  */
 void captureThread(
     const std::string& source,
     bool is_camera,
-    ThreadSafeQueue<TimestampedFrame>& queue,
+    ThreadSafeQueue<TimestampedFrame>& queue_lateral,
+    ThreadSafeQueue<TimestampedFrame>* queue_longitudinal,
     PerformanceMetrics& metrics,
     std::atomic<bool>& running,
     CanInterface* can_interface = nullptr)
@@ -307,11 +312,19 @@ void captureThread(
         tf.frame_number = frame_number++;
         tf.timestamp = t_end;
         tf.vehicle_state = current_state;
-        queue.push(tf);
+        
+        // Broadcast to both queues (parallel processing)
+        queue_lateral.push(tf);
+        if (queue_longitudinal) {
+            queue_longitudinal->push(tf);
+        }
     }
 
     running.store(false);
-    queue.stop();
+    queue_lateral.stop();
+    if (queue_longitudinal) {
+        queue_longitudinal->stop();
+    }
      cap.release();
 }
 
@@ -420,6 +433,7 @@ void lateralInferenceThread(
           // ========================================
           PathFinderOutput path_output; // Declaring at higher scope for result storage
           path_output.fused_valid = false; // Initialize as invalid
+          bool lane_departure_warning = false; // Declare at higher scope
           
           if (final_metrics.bev_visuals.valid) {
               
@@ -482,8 +496,7 @@ void lateralInferenceThread(
               }
 
               // 6. Issue lane departure warning if the vehicle is drifting outside the driving corridor
-              double drift_ratio = Math.abs(path_output.cte)/(path_output.lane_width*0.5 + 0.000001);
-              bool lane_departure_warning = false;
+              double drift_ratio = std::abs(path_output.cte)/(path_output.lane_width*0.5 + 0.000001);
 
               if(drift_ratio > 0.5){
                 lane_departure_warning = true;
@@ -886,7 +899,7 @@ void displayThread(
 }
 
 /**
- * @brief Longitudinal display thread - handles visualization of tracking results
+ * @brief Longitudinal display thread - visualizes tracking results using visualize_long
  */
 void longitudinalDisplayThread(
     ThreadSafeQueue<LongitudinalResult>& queue,
@@ -898,21 +911,14 @@ void longitudinalDisplayThread(
 )
 {
     // Visualization setup
-    int window_width = 1920;
-    int window_height = 1280;
-    
     if (enable_viz) {
         cv::namedWindow("Longitudinal Tracking", cv::WINDOW_NORMAL);
-        cv::resizeWindow("Longitudinal Tracking", window_width, window_height);
+        cv::resizeWindow("Longitudinal Tracking", 1920, 1280);
     }
 
     // Video writer setup
     cv::VideoWriter video_writer;
     bool video_writer_initialized = false;
-
-    if (save_video && enable_viz) {
-        std::cout << "Longitudinal video saving enabled. Output: " << output_video_path << std::endl;
-    }
 
     while (running.load()) {
         LongitudinalResult result;
@@ -923,30 +929,11 @@ void longitudinalDisplayThread(
 
         auto t_display_start = steady_clock::now();
 
-        // Prepare visualization frame
+        // Use visualize_long to draw tracked objects and CIPO
         cv::Mat vis_frame = result.frame.clone();
-        
-        // Draw tracked objects and CIPO
-        drawTrackedObjects(vis_frame, result.tracked_objects, result.cipo);
-
-        // Display warnings for events
-        if (result.cut_in_detected) {
-            cv::putText(vis_frame, "CUT-IN DETECTED!", 
-                       cv::Point(50, 100), 
-                       cv::FONT_HERSHEY_BOLD, 
-                       2.0, 
-                       cv::Scalar(0, 0, 255), 
-                       3);
-        }
-        
-        if (result.kalman_reset) {
-            cv::putText(vis_frame, "KALMAN RESET", 
-                       cv::Point(50, 150), 
-                       cv::FONT_HERSHEY_SIMPLEX, 
-                       1.5, 
-                       cv::Scalar(0, 165, 255), 
-                       3);
-        }
+        std::vector<Detection> empty_detections;  // No raw detections in display thread
+        drawTrackedObjects(vis_frame, empty_detections, result.tracked_objects, result.cipo, 
+                          result.cut_in_detected, result.kalman_reset);
 
         if (enable_viz) {
             cv::imshow("Longitudinal Tracking", vis_frame);
@@ -954,18 +941,11 @@ void longitudinalDisplayThread(
             // Initialize video writer on first frame
             if (save_video && !video_writer_initialized) {
                 int fourcc = cv::VideoWriter::fourcc('a', 'v', 'c', '1');  // H.264
-                video_writer.open(
-                    output_video_path,
-                    fourcc,
-                    10.0,
-                    vis_frame.size(),
-                    true
-                );
+                video_writer.open(output_video_path, fourcc, 10.0, vis_frame.size(), true);
                 
                 if (video_writer.isOpened()) {
-                    std::cout << "Longitudinal video writer initialized (H.264): " 
-                             << vis_frame.cols << "x" << vis_frame.rows 
-                             << " @ 10 fps" << std::endl;
+                    std::cout << "Longitudinal video writer initialized: " 
+                             << vis_frame.cols << "x" << vis_frame.rows << " @ 10 fps" << std::endl;
                     video_writer_initialized = true;
                 } else {
                     std::cerr << "Failed to initialize longitudinal video writer" << std::endl;
@@ -973,12 +953,10 @@ void longitudinalDisplayThread(
                 }
             }
             
-            // Write frame if enabled
             if (save_video && video_writer_initialized) {
                 video_writer.write(vis_frame);
             }
             
-            // Press 'q' to quit
             int key = cv::waitKey(1);
             if (key == 'q' || key == 27) {
                 running.store(false);
@@ -986,9 +964,8 @@ void longitudinalDisplayThread(
         }
 
         auto t_display_end = steady_clock::now();
-        long display_us = duration_cast<microseconds>(
-            t_display_end - t_display_start).count();
-        metrics.total_display_us.fetch_add(display_us);
+        metrics.total_display_us.fetch_add(duration_cast<microseconds>(
+            t_display_end - t_display_start).count());
     }
 
     // Cleanup
@@ -1349,9 +1326,12 @@ int main(int argc, char** argv)
     std::cout << "\nNOTE: Lateral and Longitudinal pipelines running in PARALLEL (unsynchronized for now)" << std::endl;
     std::cout << "========================================\n" << std::endl;
 
-    // Launch threads (lateral pipeline)
-    std::thread t_capture(captureThread, source, is_camera, std::ref(capture_queue),
+    // Launch threads - single capture broadcasts to both pipelines
+    std::thread t_capture(captureThread, source, is_camera, 
+                          std::ref(capture_queue), &capture_queue_long,
                           std::ref(metrics), std::ref(running), can_interface.get());
+    
+    // Lateral pipeline
     std::thread t_lateral_inference(lateralInferenceThread, std::ref(engine),
                             std::ref(capture_queue), std::ref(display_queue),
                             std::ref(metrics), std::ref(running), threshold,
@@ -1367,9 +1347,7 @@ int main(int argc, char** argv)
                           std::ref(running), enable_viz, save_video, output_video_path, csv_log_path);
 #endif
 
-    // Launch threads (longitudinal pipeline - parallel, separate capture)
-    std::thread t_capture_long(captureThread, source, is_camera, std::ref(capture_queue_long),
-                               std::ref(metrics), std::ref(running), can_interface.get());
+    // Longitudinal pipeline (parallel execution, same frames from single capture)
     std::thread t_longitudinal_inference(longitudinalInferenceThread, 
                                         std::ref(*autospeed_engine),
                                         std::ref(*object_finder),
@@ -1387,12 +1365,10 @@ int main(int argc, char** argv)
                               save_video, 
                               output_video_path + ".long.mp4");
 
-    // Wait for threads (both pipelines)
+    // Wait for all threads
     t_capture.join();
     t_lateral_inference.join();
     t_display.join();
-    
-    t_capture_long.join();
     t_longitudinal_inference.join();
     t_display_long.join();
 
