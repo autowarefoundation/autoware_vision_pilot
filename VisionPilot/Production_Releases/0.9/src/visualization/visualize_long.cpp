@@ -1,13 +1,13 @@
 // Draw detections and tracked objects with IDs, distances, velocities, and CIPO indicator
 
-#include "../../include/visualization/visualize_long.hpp"
+#include "visualization/visualize_long.hpp"
 #include <opencv2/opencv.hpp>
 #include <vector>
 #include <string>
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
-#include "../../include/tracking/object_finder.hpp"
+#include "tracking/object_finder.hpp"
 #include "../../include/inference/autospeed/onnxruntime_engine.hpp"
 
 using namespace autoware_pov::vision::tracking;
