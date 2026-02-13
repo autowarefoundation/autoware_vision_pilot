@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(OpenCV REQUIRED)
 find_package(Threads REQUIRED)
 find_package(Eigen3 REQUIRED)
+find_package(yaml-cpp REQUIRED)
 
 # Config reader uses properties file format (no external dependencies needed)
 
@@ -291,6 +292,7 @@ add_library(longitudinal_tracking
 target_compile_definitions(longitudinal_tracking PRIVATE LOG_TYPE=0)
 target_link_libraries(longitudinal_tracking
     ${OpenCV_LIBS}
+    yaml-cpp
 )
 
 # Config reader module (properties file format - no dependencies)
