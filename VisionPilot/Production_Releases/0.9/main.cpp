@@ -230,11 +230,16 @@ std::vector<cv::Point2f> transformPixelsToMeters(const std::vector<cv::Point2f>&
 
 /**
  * @brief Unified capture thread - handles both video files and cameras
+ * @param queue_lateral Output queue for lateral pipeline
+ * @param queue_longitudinal Output queue for longitudinal pipeline
+ * 
+ * Broadcasts frames to both lateral and longitudinal queues for parallel processing
  */
 void captureThread(
     const std::string& source,
     bool is_camera,
-    ThreadSafeQueue<TimestampedFrame>& queue,
+    ThreadSafeQueue<TimestampedFrame>& queue_lateral,
+    ThreadSafeQueue<TimestampedFrame>& queue_longitudinal,
     PerformanceMetrics& metrics,
     std::atomic<bool>& running,
     CanInterface* can_interface = nullptr)
@@ -307,12 +312,16 @@ void captureThread(
         tf.frame_number = frame_number++;
         tf.timestamp = t_end;
         tf.vehicle_state = current_state;
-        queue.push(tf);
+        
+        // Broadcast to both queues (parallel processing)
+        queue_lateral.push(tf);
+        queue_longitudinal.push(tf);
     }
 
     running.store(false);
-    queue.stop();
-     cap.release();
+    queue_lateral.stop();
+    queue_longitudinal.stop();
+    cap.release();
 }
 
 /**
@@ -1332,9 +1341,12 @@ int main(int argc, char** argv)
     std::cout << "\nNOTE: Lateral and Longitudinal pipelines running in PARALLEL (unsynchronized for now)" << std::endl;
     std::cout << "========================================\n" << std::endl;
 
-    // Launch threads (lateral pipeline)
-    std::thread t_capture(captureThread, source, is_camera, std::ref(capture_queue),
+    // Launch threads - single capture broadcasts to both pipelines
+    std::thread t_capture(captureThread, source, is_camera, 
+                          std::ref(capture_queue), std::ref(capture_queue_long),
                           std::ref(metrics), std::ref(running), can_interface.get());
+    
+    // Lateral pipeline
     std::thread t_lateral_inference(lateralInferenceThread, std::ref(engine),
                             std::ref(capture_queue), std::ref(display_queue),
                             std::ref(metrics), std::ref(running), threshold,
@@ -1350,9 +1362,7 @@ int main(int argc, char** argv)
                           std::ref(running), enable_viz, save_video, output_video_path, csv_log_path);
 #endif
 
-    // Launch threads (longitudinal pipeline - parallel, separate capture)
-    std::thread t_capture_long(captureThread, source, is_camera, std::ref(capture_queue_long),
-                               std::ref(metrics), std::ref(running), can_interface.get());
+    // Longitudinal pipeline (parallel execution, same frames from single capture)
     std::thread t_longitudinal_inference(longitudinalInferenceThread, 
                                         std::ref(*autospeed_engine),
                                         std::ref(*object_finder),
@@ -1370,12 +1380,10 @@ int main(int argc, char** argv)
                               save_video, 
                               output_video_path + ".long.mp4");
 
-    // Wait for threads (both pipelines)
+    // Wait for all threads
     t_capture.join();
     t_lateral_inference.join();
     t_display.join();
-    
-    t_capture_long.join();
     t_longitudinal_inference.join();
     t_display_long.join();
 
