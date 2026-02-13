@@ -361,18 +361,18 @@ void lateralInferenceThread(
         if (tf.frame.empty()) continue;
 
         auto t_inference_start = steady_clock::now();
-        // std::cout<< "Frame size before cropping: " << tf.frame.size() << std::endl;
-         // Crop tf.frame 420 pixels top
-         tf.frame = tf.frame(cv::Rect(
-             0,
-             420,
-             tf.frame.cols,
-             tf.frame.rows - 420
-         ));
-        //  std::cout<< "Frame size: " << tf.frame.size() << std::endl;
+        
+        // Clone frame before cropping to avoid affecting longitudinal thread
+        // (cv::Mat uses shallow copy, so both threads share the same underlying data)
+        cv::Mat cropped_frame = tf.frame(cv::Rect(
+            0,
+            420,
+            tf.frame.cols,
+            tf.frame.rows - 420
+        )).clone();
 
-        // Run Ego Lanes inference 
-        LaneSegmentation raw_lanes = engine.inference(tf.frame, threshold);
+        // Run Ego Lanes inference on cropped frame
+        LaneSegmentation raw_lanes = engine.inference(cropped_frame, threshold);
 
         // ========================================
         // AUTOSTEER INTEGRATION
@@ -408,7 +408,7 @@ void lateralInferenceThread(
         LaneSegmentation filtered_lanes = lane_filter.update(raw_lanes);
 
          // Further processing with lane tracker
-         cv::Size frame_size(tf.frame.cols, tf.frame.rows);
+         cv::Size frame_size(cropped_frame.cols, cropped_frame.rows);
          std::pair<LaneSegmentation, DualViewMetrics> track_result = lane_tracker.update(
              filtered_lanes,
              frame_size
@@ -500,13 +500,12 @@ void lateralInferenceThread(
           }
           // ========================================
 
-        // Package result (clone frame to avoid race with capture thread reusing buffer)
+        // Package result (use cropped frame for lateral visualization)
         InferenceResult result;
-        // std::cout<< "Frame size: " << tf.frame.size() << std::endl;
-        result.frame = tf.frame.clone();  // Clone for display thread safety
+        result.frame = cropped_frame.clone();  // Clone cropped frame for display thread safety
         
         // Resize frame to 640x320 for Rerun logging (only if Rerun enabled, but prepare anyway)
-        cv::resize(tf.frame, result.resized_frame_320x640, cv::Size(640, 320), 0, 0, cv::INTER_AREA);
+        cv::resize(cropped_frame, result.resized_frame_320x640, cv::Size(640, 320), 0, 0, cv::INTER_AREA);
         result.lanes = final_lanes;
         result.metrics = final_metrics;
         result.frame_number = tf.frame_number;
