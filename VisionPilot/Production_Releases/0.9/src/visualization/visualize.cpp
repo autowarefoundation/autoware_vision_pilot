@@ -1,6 +1,10 @@
 #include "visualization/visualize.hpp"
 #include <opencv2/core/types.hpp>
 #include <opencv2/highgui.hpp>
+#include <optional>
+#include <sstream>
+#include <iomanip>
+#include <cmath>
 
 namespace autoware_pov::vision::egolanes
 {
