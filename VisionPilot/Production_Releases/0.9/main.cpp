@@ -272,10 +272,6 @@ void captureThread(
     std::cout << "Total frames: " << total_frames << std::endl;
      }
 
-     // For camera: throttle 30fps → 10fps
-     int frame_skip = 0;
-     int skip_interval = is_camera ? 3 : 1;
-
     int frame_number = 0;
     while (running.load()) {
         auto t_start = steady_clock::now();
@@ -292,10 +288,6 @@ void captureThread(
 
          auto t_end = steady_clock::now();
 
-         // Frame throttling
-         if (++frame_skip < skip_interval) continue;
-         frame_skip = 0;
-
         long capture_us = duration_cast<microseconds>(t_end - t_start).count();
         metrics.total_capture_us.fetch_add(capture_us);
 
@@ -307,15 +299,26 @@ void captureThread(
             std::cout << "CAN State: " << current_state.steering_angle_deg << std::endl;
         }
 
-        TimestampedFrame tf;
-        tf.frame = frame;
-        tf.frame_number = frame_number++;
-        tf.timestamp = t_end;
-        tf.vehicle_state = current_state;
+        // Clone frame for lateral (will be cropped in-place)
+        // MUST clone because VideoCapture reuses the frame buffer!
+        TimestampedFrame tf_lateral;
+        tf_lateral.frame = frame.clone();  // Independent copy
+        tf_lateral.frame_number = frame_number;
+        tf_lateral.timestamp = t_end;
+        tf_lateral.vehicle_state = current_state;
+        
+        // Clone frame for longitudinal (needs full uncropped frame)
+        TimestampedFrame tf_long;
+        tf_long.frame = frame.clone();  // Independent copy
+        tf_long.frame_number = frame_number;
+        tf_long.timestamp = t_end;
+        tf_long.vehicle_state = current_state;
+        
+        frame_number++;
         
         // Broadcast to both queues (parallel processing)
-        queue_lateral.push(tf);
-        queue_longitudinal.push(tf);
+        queue_lateral.push(tf_lateral);
+        queue_longitudinal.push(tf_long);
     }
 
     running.store(false);
@@ -362,17 +365,16 @@ void lateralInferenceThread(
 
         auto t_inference_start = steady_clock::now();
         
-        // Clone frame before cropping to avoid affecting longitudinal thread
-        // (cv::Mat uses shallow copy, so both threads share the same underlying data)
-        cv::Mat cropped_frame = tf.frame(cv::Rect(
+        // Crop frame in-place (safe - capture thread gave us our own copy)
+        tf.frame = tf.frame(cv::Rect(
             0,
             420,
             tf.frame.cols,
             tf.frame.rows - 420
-        )).clone();
+        ));
 
-        // Run Ego Lanes inference on cropped frame
-        LaneSegmentation raw_lanes = engine.inference(cropped_frame, threshold);
+        // Run Ego Lanes inference
+        LaneSegmentation raw_lanes = engine.inference(tf.frame, threshold);
 
         // ========================================
         // AUTOSTEER INTEGRATION
@@ -408,7 +410,7 @@ void lateralInferenceThread(
         LaneSegmentation filtered_lanes = lane_filter.update(raw_lanes);
 
          // Further processing with lane tracker
-         cv::Size frame_size(cropped_frame.cols, cropped_frame.rows);
+         cv::Size frame_size(tf.frame.cols, tf.frame.rows);
          std::pair<LaneSegmentation, DualViewMetrics> track_result = lane_tracker.update(
              filtered_lanes,
              frame_size
@@ -500,12 +502,12 @@ void lateralInferenceThread(
           }
           // ========================================
 
-        // Package result (use cropped frame for lateral visualization)
+        // Package result (frame is already cropped in-place)
         InferenceResult result;
-        result.frame = cropped_frame.clone();  // Clone cropped frame for display thread safety
+        result.frame = tf.frame;  // No need to clone - display thread will handle it
         
         // Resize frame to 640x320 for Rerun logging (only if Rerun enabled, but prepare anyway)
-        cv::resize(cropped_frame, result.resized_frame_320x640, cv::Size(640, 320), 0, 0, cv::INTER_AREA);
+        cv::resize(tf.frame, result.resized_frame_320x640, cv::Size(640, 320), 0, 0, cv::INTER_AREA);
         result.lanes = final_lanes;
         result.metrics = final_metrics;
         result.frame_number = tf.frame_number;
@@ -579,9 +581,9 @@ void longitudinalInferenceThread(
             std::cout << std::endl;
         }
 
-        // Package result
+        // Package result (frame already cloned by capture thread)
         LongitudinalResult result;
-        result.frame = tf.frame.clone();
+        result.frame = tf.frame;  // No need to clone - already independent from lateral
         result.tracked_objects = tracking_result.tracked_objects;
         result.cipo = tracking_result.cipo;
         result.frame_number = tf.frame_number;
