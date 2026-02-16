@@ -314,6 +314,13 @@ void captureThread(
         tf_long.timestamp = t_end;
         tf_long.vehicle_state = current_state;
         
+        // Debug: Verify clones
+        std::cout << "[Capture Frame " << frame_number << "] Lateral: " 
+                  << tf_lateral.frame.cols << "x" << tf_lateral.frame.rows 
+                  << " empty=" << tf_lateral.frame.empty()
+                  << ", Long: " << tf_long.frame.cols << "x" << tf_long.frame.rows 
+                  << " empty=" << tf_long.frame.empty() << std::endl;
+        
         frame_number++;
         
         // Broadcast to both queues (parallel processing)
@@ -361,17 +368,31 @@ void lateralInferenceThread(
 
     while (running.load()) {
         TimestampedFrame tf = input_queue.pop();
-        if (tf.frame.empty()) continue;
+        if (tf.frame.empty()) {
+            std::cerr << "[Lateral] Received empty frame from queue!" << std::endl;
+            continue;
+        }
 
         auto t_inference_start = steady_clock::now();
         
-        // Crop frame in-place (safe - capture thread gave us our own copy)
+        // Debug: Check frame before crop
+        std::cout << "[Lateral Frame " << tf.frame_number << "] Before crop: " 
+                  << tf.frame.cols << "x" << tf.frame.rows 
+                  << " empty=" << tf.frame.empty() << std::endl;
+        
+        // Crop frame and clone to avoid ROI issues
+        // ROI creates a shallow reference, so we need to clone for safety
         tf.frame = tf.frame(cv::Rect(
             0,
             420,
             tf.frame.cols,
             tf.frame.rows - 420
-        ));
+        )).clone();  //  Clone the ROI to get independent data
+        
+        // Debug: Check frame after crop
+        std::cout << "[Lateral Frame " << tf.frame_number << "] After crop+clone: " 
+                  << tf.frame.cols << "x" << tf.frame.rows 
+                  << " empty=" << tf.frame.empty() << std::endl;
 
         // Run Ego Lanes inference
         LaneSegmentation raw_lanes = engine.inference(tf.frame, threshold);
@@ -504,10 +525,21 @@ void lateralInferenceThread(
 
         // Package result (frame is already cropped in-place)
         InferenceResult result;
-        result.frame = tf.frame;  // No need to clone - display thread will handle it
+        result.frame = tf.frame.clone();  // ⭐ Must clone for display thread!
+        
+        // Debug: Check frame before resize
+        std::cout << "[Lateral Frame " << tf.frame_number << "] Before resize: " 
+                  << result.frame.cols << "x" << result.frame.rows 
+                  << " empty=" << result.frame.empty() 
+                  << " continuous=" << result.frame.isContinuous() << std::endl;
         
         // Resize frame to 640x320 for Rerun logging (only if Rerun enabled, but prepare anyway)
-        cv::resize(tf.frame, result.resized_frame_320x640, cv::Size(640, 320), 0, 0, cv::INTER_AREA);
+        // ⭐ Use result.frame (cloned copy) instead of tf.frame to avoid corruption
+        if (!result.frame.empty() && result.frame.cols > 0 && result.frame.rows > 0) {
+            cv::resize(result.frame, result.resized_frame_320x640, cv::Size(640, 320), 0, 0, cv::INTER_AREA);
+        } else {
+            std::cerr << "[Lateral Frame " << tf.frame_number << "] ERROR: Cannot resize empty/invalid frame!" << std::endl;
+        }
         result.lanes = final_lanes;
         result.metrics = final_metrics;
         result.frame_number = tf.frame_number;
@@ -542,9 +574,17 @@ void longitudinalInferenceThread(
 {
     while (running.load()) {
         TimestampedFrame tf = input_queue.pop();
-        if (tf.frame.empty()) continue;
+        if (tf.frame.empty()) {
+            std::cerr << "[Longitudinal] Received empty frame from queue!" << std::endl;
+            continue;
+        }
 
         auto t_inference_start = steady_clock::now();
+        
+        // Debug: Check frame
+        std::cout << "[Longitudinal Frame " << tf.frame_number << "] Frame: " 
+                  << tf.frame.cols << "x" << tf.frame.rows 
+                  << " empty=" << tf.frame.empty() << std::endl;
 
         // 1. Run AutoSpeed detection
         std::vector<Detection> detections = autospeed_engine.inference(
@@ -583,7 +623,7 @@ void longitudinalInferenceThread(
 
         // Package result (frame already cloned by capture thread)
         LongitudinalResult result;
-        result.frame = tf.frame;  // No need to clone - already independent from lateral
+        result.frame = tf.frame.clone();  //Must clone for display thread!
         result.tracked_objects = tracking_result.tracked_objects;
         result.cipo = tracking_result.cipo;
         result.frame_number = tf.frame_number;
@@ -659,6 +699,19 @@ void displayThread(
   cv::Mat predSteeringWheelImg = cv::imread(predSteeringImagePath, cv::IMREAD_UNCHANGED);
   std::string gtSteeringImagePath = std::string(VISIONPILOT_SHARE_DIR) + "/images/wheel_white.png";
   cv::Mat gtSteeringWheelImg = cv::imread(gtSteeringImagePath, cv::IMREAD_UNCHANGED);
+  
+  // Verify steering wheel images loaded
+  if (predSteeringWheelImg.empty()) {
+      std::cerr << "ERROR: Failed to load steering wheel image: " << predSteeringImagePath << std::endl;
+      std::cerr << "VISIONPILOT_SHARE_DIR = " << VISIONPILOT_SHARE_DIR << std::endl;
+      // Create dummy image as fallback
+      predSteeringWheelImg = cv::Mat(100, 100, CV_8UC4, cv::Scalar(0, 255, 0, 255));
+  }
+  if (gtSteeringWheelImg.empty()) {
+      std::cerr << "WARNING: Failed to load GT steering wheel image: " << gtSteeringImagePath << std::endl;
+      // Create dummy image as fallback
+      gtSteeringWheelImg = cv::Mat(100, 100, CV_8UC4, cv::Scalar(255, 255, 255, 255));
+  }
 
     while (running.load()) {
         InferenceResult result;
@@ -908,8 +961,8 @@ void longitudinalDisplayThread(
 )
 {
     // Visualization setup
-    int window_width = 1920;
-    int window_height = 1280;
+    int window_width = 640;
+    int window_height = 320;
     
     if (enable_viz) {
         cv::namedWindow("Longitudinal Tracking", cv::WINDOW_NORMAL);
@@ -933,15 +986,14 @@ void longitudinalDisplayThread(
 
         auto t_display_start = steady_clock::now();
 
-        // Prepare visualization frame
-        cv::Mat vis_frame = result.frame.clone();
-        
-        // Draw tracked objects and CIPO (pass empty detections vector)
-        std::vector<Detection> empty_detections;
-        drawTrackedObjects(vis_frame, empty_detections, result.tracked_objects, 
-                          result.cipo, result.cut_in_detected, result.kalman_reset);
-
         if (enable_viz) {
+            // Prepare visualization frame (only when viz enabled)
+            cv::Mat vis_frame = result.frame.clone();
+            
+            // Draw tracked objects and CIPO (pass empty detections vector)
+            std::vector<Detection> empty_detections;
+            drawTrackedObjects(vis_frame, empty_detections, result.tracked_objects, 
+                          result.cipo, result.cut_in_detected, result.kalman_reset);
             cv::imshow("Longitudinal Tracking", vis_frame);
             
             // Initialize video writer on first frame
