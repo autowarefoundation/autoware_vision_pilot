@@ -1,97 +1,99 @@
 # ROS2
-Ensure that CARLA server is running with `--ros2` args, then open a new terminal and run
-```sh
-ros2 topic echo /clock
-```
-If CARLA is fully rendered and running, timestamps messages should be logged. If not, jump to `Troubleshooting` section below.
 
-There should not be much topics available right now as the CARLA world is not configured yet and the ego vehicle has not been spawned along with the sensors, follow [HERE](../CARLA/ROS/README.md) on how to do so.
+## CARLA simulator
 
-## Demo
-Here is how to run the autopilot example CARLA provided
-```sh
-cd .../Carla-0.10.0-Linux-Shipping/PythonAPI/examples/ros2
-python3 ros2_native.py -f stack.json
-```
+Run CARLA server with `--ros2` arg, to enable ROS2 integration.
 
-### RVIZ2 Visualization
-Run the script provided from the CARLA installation to run another docker image
-```sh
-cd .../Carla-0.10.0-Linux-Shipping/PythonAPI/examples/ros2
-./run_rviz.sh
 ```
-or locally 
-```sh
-cd .../Carla-0.10.0-Linux-Shipping/PythonAPI/examples/ros2
-ros2 run rviz2 rviz2 -d rviz/ros2_native.rviz
+docker run -it --rm \
+  --runtime=nvidia \                        # Use NVIDIA runtime for GPU access
+  --net=host \                              # Use the host's network stack (helps with networking/performance)
+  --env=DISPLAY=$DISPLAY \                  # Pass the host's DISPLAY environment variable (for GUI forwarding)
+  --env=NVIDIA_VISIBLE_DEVICES=all \        # Expose all GPUs to the container
+  --env=NVIDIA_DRIVER_CAPABILITIES=all \    # Enable all driver capabilities (graphics, compute, etc.)
+  --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \ # Mount X11 UNIX socket to enable GUI apps to display
+  --volume="$HOME/Downloads/carla/CARLA_0.9.16/:/home/carla/host-carla" \ 
+                                            # CHANGE AS NEEDED: Mount your local CARLA folder into the container
+  --workdir="/home/carla/host-carla" \      # Set the working directory to the mounted CARLA folder
+  carlasim/carla:0.9.16 \                   # Use the official CARLA Docker image, version 0.9.16
+  bash CarlaUE4.sh -nosound --ros2          # Run the CARLA startup script with -nosound flag
 ```
 
-![](../../Media/carla_ros.gif)
+## Scenario runner
 
-## Troubleshooting
-In a local terminal outside of the docker images, if the ROS2 topics are available but no messages are getting through. Add the following to `~/.bashrc` locally, source and try again.
+Clone the ScenarioRunner repository.
 
-```sh
-# Modify file path as needed
-export FASTRTPS_DEFAULT_PROFILES_FILE=~/Carla-0.10.0-Linux-Shipping/PythonAPI/examples/ros2/config/fastrtps-profile.xml 
+```
+git clone https://github.com/carla-simulator/scenario_runner.git
+cd scenario_runner
+python3 -m venv .venv 
+pip3 install -r requirements.txt
+export CARLA_ROOT=<CARLA ROOT directory>
+export PYTHONPATH=$CARLA_ROOT/PythonAPI/carla
 ```
 
-# Configuring CARLA for Vision Pilot Testing
+Run scenario for example
 
-## How to Run
-After CARLA simulator server is up and runnning, run
-```sh
-# CARLA_0.10.0 with UE5
-python3 ros_carla_config.py -f config/VisionPilot_carla10.json -v -a
-
-# CARLA_0.9.16 with UE4
-python3 ros_carla_config.py -f config/VisionPilot_carla9.json -v -a
 ```
-This script spawns the ego vehicle and sensors, enables the ROS2 interface and the spectator view will follow the vehicle in the simulator. The arg `-v` enables verbose output and `-a` enables CARLA's built-in Traffic Manager autopilot (off by-default), which is suitable for testing Perception models.
-
-### RVIZ2 Visualization
-```sh
-ros2 run rviz2 rviz2 -d config/VisionPilot.rviz
+python3 ./scenario_runner.py --openscenario ./srunner/examples/LaneChangeSimple.xosc
 ```
 
-## Sensor Configurations
-To add/remove sensors or change sensor attributes such as Range, FOV and mounting pose, modify or create a copy of `config/VisionPilot.json`. The current configuration is for testing SAE L3 single lane Vision Pilot.
+## ROS2 bridge
 
-![](../../../Media/Roadmap.jpg)
+Run VisionPilot ROS2 bridge
 
-List of sensors available in CARLA 0.10.0: https://carla-ue5.readthedocs.io/en/latest/ref_sensors/
-
-## Control Command
-For testing controllers or the full perception-control pipeline, run `ros_carla_config.py` without `-a` autopilot on and publish [`ros_carla_msgs/CarlaEgoVehicleControl.msg`](https://carla-ue5.readthedocs.io/en/latest/ros2_native/#:~:text=ego/vehicle_control_cmd.-,CarlaEgoVehicleControl.msg,-To%20send%20control) to `/carla/hero/vehicle_control_cmd` topic. Install the package separately from https://github.com/carla-simulator/ros-carla-msgs/tree/master.
-
-## CARLA-Autoware Custom Interfaces
-- [waypoints_publisher](../ROS/src/waypoints_publisher/README.md)
-- [odom_publisher](../ROS/src/odom_publisher/README.md)
-<!-- - control_msg_converter: converts autoware controller output from `autoware_control_msgs/Control` to `ros_carla_msgs/CarlaEgoVehicleControl.msg` -->
-
-To use these packages
-```sh
-# In this current directory
+```
+cd autoware.privately-owned-vehicles/VisionPilot/Simulation/CARLA/ROS2
+git clone https://github.com/carla-simulator/ros-carla-msgs.git
 colcon build
 source install/setup.bash
-
-ros2 run waypoints_publisher pub_waypoints_node
-
-# In another terminal (remember to source)
-ros2 run odom_publisher pub_odom_node
+ros2 launch carla_bridge_bringup carla_bridge.launch.py
 ```
 
-## VisionPilot Testing Pipeline (Simulated EgoPath & EgoLanes)
-### How to run
-1. Build & source [VisionPilot ROS2 workspace](../../../VisionPilot/ROS2/)
-2. Build & source this [workspace](../ROS2/)
-3. Run [CARLA server with ROS2 enabled](../../README.md)
-4. Wait for world to be loaded, then launch VisionPilot pipeline
-   ```sh 
-   # CARLA 0.9.16
-   ros2 launch vision_pilot_bringup demo_carla9_launch.py    
-   
-   # CARLA 0.10.0
-   ros2 launch vision_pilot_bringup demo_carla10_launch.py 
-    ```
-![](../../../Media/VisionPilot_demo.gif)CARLA 0.10.0
+## VisionPilot 0.5
+
+Run VisionPilot 0.5
+
+```
+cd autoware.privately-owned-vehicles/VisionPilot/Middleware_Recipes/ROS2/VisionPilot_0.5
+mkdir build && cd build
+cmake ..
+make
+```
+
+Update VisionPilot configuration
+
+```
+autoware.privately-owned-vehicles/VisionPilot/Middleware_Recipes/ROS2/VisionPilot_0.5/visionpilot.conf
+```
+
+Update TensorRT cache directory 
+
+```
+models.egolanes.cache_dir=/home/<USER>/.trt_cache
+```
+
+Update VisionPilot configuration for model directories
+
+```
+models.egolanes.path=/usr/share/visionpilot/models/EgoLanes_FP32.onnx
+models.autosteer.path=/usr/share/visionpilot/models/AutoSteer_FP32.onnx
+```
+
+Update the default velocity if needed
+
+```
+velocity=50 # km/h
+```
+
+Run VisionPilot
+
+```
+./visionpilot ../visionpilot.conf
+```
+
+**_Note_**: Remove ctrl_shm in case not cleaned up
+
+```
+rm /dev/shm/ctrl_shm
+```
