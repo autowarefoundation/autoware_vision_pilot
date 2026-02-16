@@ -36,10 +36,10 @@ int main(int argc, char* argv[]) {
         if (!cap.isOpened()) {
             throw std::runtime_error("Error opening video stream or file: " + input_video_path);
         }
-        // const double fps = cap.get(cv::CAP_PROP_FPS);
-        const double fps = 60;
+        const double fps = cap.get(cv::CAP_PROP_FPS);
+        // const double fps = 60;
         const auto frame_duration = std::chrono::nanoseconds(static_cast<long long>(1'000'000'000.0 / fps));
-        // std::cout << "Publishing video from '" << input_video_path << "' (" << fps << " FPS) to key '" << keyexpr << "'..." << std::endl;
+        std::cout << "Publishing video from '" << input_video_path << "' (" << fps << " FPS) to key '" << keyexpr << "'..." << std::endl;
 
         // Create Zenoh session
         z_owned_config_t config;

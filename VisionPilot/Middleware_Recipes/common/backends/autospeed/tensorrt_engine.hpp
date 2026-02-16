@@ -2,6 +2,7 @@
 #define AUTOSPEED_TENSORRT_ENGINE_HPP_
 
 #include "../../include/inference_backend_base.hpp"
+#include "detection.hpp"
 #include <NvInfer.h>
 #include <memory>
 #include <vector>
@@ -13,13 +14,6 @@ namespace autoware_pov::vision::autospeed
 class Logger : public nvinfer1::ILogger
 {
   void log(Severity severity, const char * msg) noexcept override;
-};
-
-// AutoSpeed-specific detection structure
-struct Detection {
-  float x1, y1, x2, y2;  // Bounding box corners
-  float confidence;       // Detection confidence
-  int class_id;          // Object class ID
 };
 
 class AutoSpeedTensorRTEngine : public InferenceBackend

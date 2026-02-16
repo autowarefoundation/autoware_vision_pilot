@@ -3,6 +3,7 @@
 #include <string>
 #include <stdexcept>
 #include <chrono>
+#include <cstring>
 
 #include <CLI/CLI.hpp>
 #include <zenoh.h>
@@ -14,6 +15,12 @@
 #include "masks_visualization_kernels.hpp"
 #include "depth_visualization_engine.hpp"
 #include "fps_timer.hpp"
+
+// AutoSpeed includes
+#include "autospeed/tensorrt_engine.hpp"
+#include "autospeed/onnxruntime_engine.hpp"
+#include "object_finder.hpp"
+#include "autospeed_payload.hpp"
 
 using namespace cv; 
 using namespace std; 
@@ -52,22 +59,60 @@ int main(int argc, char* argv[]) {
     app.add_option("-g,--gpu-id", gpu_id, "GPU ID to use for CUDA backend")
         ->default_val(DEFAULT_GPU_ID);
     std::string model_type = "scene";
-    app.add_option("-m,--model-type", model_type, "Type of the model (segmentation or domain)")
+    app.add_option("-m,--model-type", model_type, "Type of the model (segmentation, depth, or autospeed)")
         ->default_val("segmentation");
     std::string config_path = "";
     app.add_option("-c,--config", config_path, "The configuration file. Currently, this file must be a valid JSON5 or YAML file.")
-        ->check(CLI::ExistingFile);;
+        ->check(CLI::ExistingFile);
+
+    // AutoSpeed-specific options
+    std::string homography_path = "";
+    app.add_option("--homography", homography_path, "Homography YAML file for distance estimation (autospeed only)");
+    float conf_threshold = 0.6f;
+    app.add_option("--conf", conf_threshold, "Confidence threshold (autospeed only)")
+        ->default_val(0.6f);
+    float iou_threshold = 0.45f;
+    app.add_option("--iou", iou_threshold, "NMS IoU threshold (autospeed only)")
+        ->default_val(0.45f);
+
     CLI11_PARSE(app, argc, argv);
 
     try {
-        // Initialize the segmentation engine
+        // Initialize inference engine based on model type
         std::unique_ptr<InferenceBackend> backend_;
-        if (backend == "onnxruntime") {
-            backend_ = std::make_unique<OnnxRuntimeBackend>(model_path, precision, gpu_id);
-        } else if (backend == "tensorrt") {
-            backend_ = std::make_unique<TensorRTBackend>(model_path, precision, gpu_id);
+        std::unique_ptr<autospeed::AutoSpeedTensorRTEngine> autospeed_trt_backend_;
+        std::unique_ptr<autospeed::AutoSpeedOnnxEngine> autospeed_onnx_backend_;
+        std::unique_ptr<ObjectFinder> object_finder_;
+
+        if (model_type == "autospeed") {
+            // AutoSpeed mode: use specialized engines
+            if (backend == "tensorrt") {
+                autospeed_trt_backend_ = std::make_unique<autospeed::AutoSpeedTensorRTEngine>(
+                    model_path, precision, gpu_id
+                );
+                std::cout << "Initialized AutoSpeed TensorRT engine" << std::endl;
+            } else if (backend == "onnxruntime") {
+                autospeed_onnx_backend_ = std::make_unique<autospeed::AutoSpeedOnnxEngine>(
+                    model_path, precision, precision, gpu_id
+                );
+                std::cout << "Initialized AutoSpeed ONNX Runtime engine" << std::endl;
+            } else {
+                throw std::invalid_argument("Unknown backend type for autospeed.");
+            }
+            // ObjectFinder will be lazily initialized after receiving first frame
+            // (needs actual image dimensions from Zenoh attachment)
+            if (homography_path.empty()) {
+                std::cout << "Warning: No homography file provided, tracking will not calculate distances" << std::endl;
+            }
         } else {
-            throw std::invalid_argument("Unknown backend type.");
+            // Segmentation/Depth mode: use generic backends
+            if (backend == "onnxruntime") {
+                backend_ = std::make_unique<OnnxRuntimeBackend>(model_path, precision, gpu_id);
+            } else if (backend == "tensorrt") {
+                backend_ = std::make_unique<TensorRTBackend>(model_path, precision, gpu_id);
+            } else {
+                throw std::invalid_argument("Unknown backend type.");
+            }
         }
 
         // Zenoh Initialization
@@ -146,7 +191,78 @@ int main(int argc, char* argv[]) {
             // Benchmark: Preprocess done
             timer.recordPreprocessEnd();
 
-            // Run inference
+            // AutoSpeed mode: different processing pipeline
+            if (model_type == "autospeed") {
+                // Lazy initialize ObjectFinder on first frame (now we have actual dimensions)
+                if (!object_finder_ && !homography_path.empty()) {
+                    object_finder_ = std::make_unique<ObjectFinder>(
+                        homography_path, col, row  // col = width, row = height
+                    );
+                    std::cout << "Initialized ObjectFinder with homography: " << homography_path
+                              << " (image size: " << col << "x" << row << ")" << std::endl;
+                }
+
+                // Run inference using AutoSpeed engine
+                std::vector<autospeed::Detection> detections;
+                if (autospeed_trt_backend_) {
+                    detections = autospeed_trt_backend_->inference(frame, conf_threshold, iou_threshold);
+                } else if (autospeed_onnx_backend_) {
+                    detections = autospeed_onnx_backend_->inference(frame, conf_threshold, iou_threshold);
+                }
+
+                // Update tracking and get CIPO
+                std::vector<TrackedObject> tracked_objects;
+                CIPOInfo cipo;
+                if (object_finder_) {
+                    tracked_objects = object_finder_->update(detections, frame);
+                    cipo = object_finder_->getCIPO(frame);
+                }
+
+                // Benchmark: Inference done
+                timer.recordInferenceEnd();
+
+                // Build unified AutoSpeedPayload
+                zenoh::AutoSpeedPayload payload;
+
+                // Copy detections (POD, use memcpy)
+                payload.num_detections = std::min(static_cast<int>(detections.size()),
+                                                   zenoh::MAX_DETECTIONS);
+                std::memcpy(payload.detections, detections.data(),
+                            payload.num_detections * sizeof(autospeed::Detection));
+
+                // Copy tracked objects (need conversion from TrackedObject)
+                payload.num_tracked = std::min(static_cast<int>(tracked_objects.size()),
+                                                zenoh::MAX_TRACKED);
+                for (int i = 0; i < payload.num_tracked; ++i) {
+                    payload.tracked[i] = zenoh::TrackedObjectPayload(tracked_objects[i]);
+                }
+
+                // Copy CIPO and event flags
+                payload.cipo = cipo;
+                if (object_finder_) {
+                    payload.cut_in_detected = object_finder_->wasCutInDetected();
+                    payload.kalman_reset = object_finder_->wasKalmanReset();
+                    object_finder_->clearEventFlags();
+                }
+
+                // Publish unified payload
+                z_publisher_put_options_t options;
+                z_publisher_put_options_default(&options);
+                z_owned_bytes_t payload_out;
+                z_bytes_copy_from_buf(&payload_out,
+                    reinterpret_cast<const uint8_t*>(&payload), sizeof(payload));
+                z_publisher_put(z_loan(pub), z_move(payload_out), &options);
+
+                // Benchmark: Output done
+                timer.recordOutputEnd();
+
+                // Release slice and sample
+                z_drop(z_move(zslice));
+                z_drop(z_move(sample));
+                continue;  // Skip the rest of the loop for autospeed
+            }
+
+            // Segmentation/Depth mode: run inference using generic backend
             if (!backend_->doInference(frame)) {
                 throw std::runtime_error("Failed to run inference on the frame");
             }

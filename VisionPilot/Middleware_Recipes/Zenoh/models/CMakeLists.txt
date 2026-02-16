@@ -67,6 +67,7 @@ include_directories(${ONNXRUNTIME_ROOTDIR}/include
                     ${OpenCV_INCLUDE_DIRS}                                            # OpenCV
                     ${TORCH_INCLUDE_DIRS}                                             # Torch
                     ${MODEL_ROOTDIR}/include                                          # Common libraries
+                    ${MODEL_ROOTDIR}/backends                                         # AutoSpeed backends
                    )
 
 link_directories("${ONNXRUNTIME_ROOTDIR}/lib")
@@ -75,11 +76,27 @@ if(onnxruntime_USE_CUDA)
     add_definitions(-DUSE_CUDA)
 endif()
 
+## Find yaml-cpp for homography loading (AutoSpeed tracking)
+find_package(yaml-cpp REQUIRED)
+
 ## Build & Link
 set(RUN_MODEL_SOURCES
     run_model.cpp
+    # Existing segmentation/depth backends
     ${MODEL_ROOTDIR}/backends/tensorrt_backend.cpp
     ${MODEL_ROOTDIR}/backends/onnx_runtime_backend.cpp
+    # AutoSpeed backends (TensorRT + ONNX Runtime)
+    ${MODEL_ROOTDIR}/backends/autospeed/tensorrt_engine.cpp
+    ${MODEL_ROOTDIR}/backends/autospeed/onnxruntime_engine.cpp
+    ${MODEL_ROOTDIR}/backends/autospeed/onnxruntime_session.cpp
+    # AutoSpeed tracking
+    ${MODEL_ROOTDIR}/tracking/object_finder.cpp
+    ${MODEL_ROOTDIR}/tracking/kalman_filter.cpp
+    ${MODEL_ROOTDIR}/tracking/tracking_utils.cpp
+    ${MODEL_ROOTDIR}/tracking/cipo_history.cpp
+    ${MODEL_ROOTDIR}/tracking/cipo_utils.cpp
+    ${MODEL_ROOTDIR}/tracking/feature_matching_utils.cpp
+    # Visualizers
     ${MODEL_ROOTDIR}/visualizers/masks_visualization_engine.cpp
     ${MODEL_ROOTDIR}/visualizers/depth_visualization_engine.cpp
     ${MODEL_ROOTDIR}/benchmark/fps_timer.cpp
@@ -109,6 +126,7 @@ target_link_libraries(run_model PRIVATE
                             opencv_imgproc
                             opencv_highgui
                             zenohc::lib
+                            yaml-cpp
                      )
 
 if(CUDA_FOUND)

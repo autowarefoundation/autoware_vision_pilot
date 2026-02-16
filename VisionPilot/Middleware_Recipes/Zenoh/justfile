@@ -62,6 +62,18 @@ run_scene3d:
     #         "./install/bin/run_model ../data/models/Scene3D_FP32.onnx -i video/input -o video/output -m depth" \
     #         "./install/bin/video_subscriber -k video/output"
 
+run_autospeed:
+    # TensorRT with tracking
+    parallel --verbose --lb ::: \
+             "./install/bin/video_publisher -k video/input -c DEFAULT_CONFIG.json5 ../data/video.mp4" \
+             "./install/bin/run_model ../data/models/autospeed.onnx -i video/input -o video/output -m autospeed -b tensorrt -p fp32 --homography ./test/homography.yaml -c DEFAULT_CONFIG.json5" \
+             "./install/bin/autospeed_subscriber -v video/input -k video/output -c DEFAULT_CONFIG.json5"
+    # ONNX Runtime with tracking
+    # parallel --verbose --lb ::: \
+    #         "./install/bin/video_publisher -k video/input -c DEFAULT_CONFIG.json5 ../data/video.mp4" \
+    #         "./install/bin/run_model ../data/models/autospeed.onnx -i video/input -o video/output -m autospeed -b onnxruntime -p cpu --homography ./test/homography.yaml -c DEFAULT_CONFIG.json5" \
+    #         "./install/bin/autospeed_subscriber -v video/input -k video/output -c DEFAULT_CONFIG.json5"
+
 clean:
     rm -rf install video_pubsub/build models/build
  

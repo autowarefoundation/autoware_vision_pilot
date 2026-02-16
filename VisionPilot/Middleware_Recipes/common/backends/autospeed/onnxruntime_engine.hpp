@@ -1,6 +1,7 @@
 #ifndef AUTOWARE_POV_VISION_AUTOSPEED_ONNXRUNTIME_ENGINE_HPP_
 #define AUTOWARE_POV_VISION_AUTOSPEED_ONNXRUNTIME_ENGINE_HPP_
 
+#include "detection.hpp"
 #include <onnxruntime_cxx_api.h>
 #include <opencv2/opencv.hpp>
 #include <string>
@@ -9,13 +10,6 @@
 
 namespace autoware_pov::vision::autospeed
 {
-
-struct Detection
-{
-  float x1, y1, x2, y2;  // Bounding box in original image coordinates
-  float confidence;
-  int class_id;
-};
 
 /**
  * @brief AutoSpeed ONNX Runtime Inference Engine

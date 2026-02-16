@@ -22,6 +22,8 @@ set(MODEL_ROOTDIR "${CMAKE_CURRENT_SOURCE_DIR}/../../common")
 include_directories(
                      ${OpenCV_INCLUDE_DIRS}    # OpenCV
                      ${MODEL_ROOTDIR}/include  # Common libraries
+                     ${MODEL_ROOTDIR}/backends # Backend types (autospeed)
+                     ${CMAKE_CURRENT_SOURCE_DIR}/../models  # Zenoh payload types
                    )
 
 ## Build & Link
@@ -36,8 +38,15 @@ add_executable(depth_subscriber depth_subscriber.cpp
                ${MODEL_ROOTDIR}/visualizers/depth_visualization_engine.cpp)
 target_link_libraries(depth_subscriber PRIVATE ${OpenCV_LIBS} opencv_videoio opencv_imgproc opencv_highgui zenohc::lib)
 
+# AutoSpeed detection subscriber
+add_executable(autospeed_subscriber autospeed_subscriber.cpp
+               ${MODEL_ROOTDIR}/visualizers/autospeed_visualization_engine.cpp
+               ${MODEL_ROOTDIR}/tracking/kalman_filter.cpp)
+target_link_libraries(autospeed_subscriber PRIVATE ${OpenCV_LIBS} opencv_videoio opencv_imgproc opencv_highgui zenohc::lib)
+
 # Install
 install(TARGETS video_publisher DESTINATION bin)
 install(TARGETS video_subscriber DESTINATION bin)
 install(TARGETS segment_subscriber DESTINATION bin)
 install(TARGETS depth_subscriber DESTINATION bin)
+install(TARGETS autospeed_subscriber DESTINATION bin)

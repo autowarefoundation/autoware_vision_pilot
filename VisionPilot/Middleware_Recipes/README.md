@@ -111,6 +111,8 @@ gdown -O models/ 'https://docs.google.com/uc?export=download&id=1l-dniunvYyFKvLD
 gdown -O models/ 'https://docs.google.com/uc?export=download&id=19gMPt_1z4eujo4jm5XKuH-8eafh-wJC6'
 ## DomainSeg
 gdown -O models/ 'https://docs.google.com/uc?export=download&id=1zCworKw4aQ9_hDBkHfj1-sXitAAebl5Y'
+## AutoSpeed
+gdown -O models/ 'https://docs.google.com/uc?export=download&id=1Zhe8uXPbrPr8cvcwHkl1Hv0877HHbxbB'
 ```
 
 ### ROS2 Implementation

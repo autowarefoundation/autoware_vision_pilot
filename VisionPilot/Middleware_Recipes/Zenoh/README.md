@@ -105,6 +105,8 @@ just run_sceneseg
 just run_domainseg
 # Scene3D
 just run_scene3d
+# AutoSpeed
+just run_autospeed
 ```
 
 - Clean the project
@@ -112,3 +114,14 @@ just run_scene3d
 ```bash
 just clean
 ```
+
+## AutoSpeed
+
+AutoSpeed detects vehicles and estimates distance/velocity using homography-based projection.
+
+### Homography Calibration
+
+AutoSpeed requires a homography file to convert image coordinates to world distances.
+
+- A homography file for testing is provided in `test` (from `Standalone/AutoSpeed`).
+- For custom cameras, modify the values or use `../Calibration/compute_homography.py` to generate a new one.
