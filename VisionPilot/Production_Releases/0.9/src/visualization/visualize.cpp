@@ -855,6 +855,11 @@ void drawMetricVerification(
 
 cv::Mat rotateSteeringWheel(const cv::Mat& img, float steering_angle_deg)
 {
+  // Safety check: return empty if input is invalid
+  if (img.empty() || img.cols <= 0 || img.rows <= 0) {
+      return cv::Mat();
+  }
+  
   // resize overlay image
   cv::Mat resized;
   cv::resize(img, resized, cv::Size(), 0.5, 0.5, cv::INTER_LINEAR);
