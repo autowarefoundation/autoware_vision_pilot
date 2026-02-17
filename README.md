@@ -28,7 +28,7 @@
 
 </div>
 
-## Open-source highway autonomy system
+## Free and fully open-source stack for ADAS and Self-Driving
 This codebase contains **productionizable and safety certifiable code for an open-source ADAS and Full Self Driving** system that can power safe autonomous driving around the world. It is designed to be integrated with automotive OEMs and Tier-1 suppliers in series production passenger cars. We offer the complete codebase as free and fully open-source, including the release of all of our model architectures, data parsing scripts, training pipelines and model weights to help democratize access to this vital technology. All of our technology is available under the persmissive Apache 2.0 licence and can freely be used for both commercial and research purposes.
 
 To learn more about how to participate in this project, please read the [onboarding guide](/ONBOARDING.md)
