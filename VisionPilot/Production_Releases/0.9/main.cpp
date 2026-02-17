@@ -74,7 +74,7 @@ using namespace autoware_pov::drivers;
 using namespace autoware_pov::config;
 using namespace std::chrono;
 
-// Thread-safe queue with max size limit
+// Thread-safe queue with max size limit (for display results only)
 template<typename T>
 class ThreadSafeQueue {
 public:
@@ -133,6 +133,82 @@ private:
     std::condition_variable cond_not_full_;
     std::atomic<bool> active_{true};
     size_t max_size_;
+};
+
+// ========================================
+// DOUBLE FRAME BUFFER for synchronized frame sharing
+// ========================================
+// Uses ping-pong buffering: capture writes to one buffer while inference reads from the other.
+// Zero lock contention, perfect for 10 FPS with <100ms inference.
+class DoubleFrameBuffer {
+public:
+    struct Frame {
+        cv::Mat frame;
+        int frame_number;
+        steady_clock::time_point timestamp;
+        CanVehicleState vehicle_state;
+    };
+
+    DoubleFrameBuffer() : read_idx_(0), initialized_(false) {}
+
+    // Capture thread writes new frame
+    void write(const cv::Mat& new_frame, int frame_number, 
+               steady_clock::time_point timestamp, 
+               const CanVehicleState& vehicle_state) {
+        int write_idx = 1 - read_idx_.load(std::memory_order_acquire);
+        
+        // Write to the non-active buffer (no locks needed!)
+        buffers_[write_idx].frame = new_frame.clone();
+        buffers_[write_idx].frame_number = frame_number;
+        buffers_[write_idx].timestamp = timestamp;
+        buffers_[write_idx].vehicle_state = vehicle_state;
+        
+        // Atomic swap: make this buffer readable
+        read_idx_.store(write_idx, std::memory_order_release);
+        initialized_.store(true, std::memory_order_release);
+        
+        // Notify waiting threads
+        cv_.notify_all();
+    }
+
+    // Inference threads read latest frame
+    Frame read() {
+        // Wait for first frame
+        std::unique_lock<std::mutex> lock(cv_mtx_);
+        cv_.wait(lock, [this] { return initialized_.load(std::memory_order_acquire); });
+        lock.unlock();
+        
+        // Read from current buffer (no locks, atomic read)
+        int idx = read_idx_.load(std::memory_order_acquire);
+        
+        Frame result;
+        result.frame = buffers_[idx].frame.clone();  // Clone for thread safety
+        result.frame_number = buffers_[idx].frame_number;
+        result.timestamp = buffers_[idx].timestamp;
+        result.vehicle_state = buffers_[idx].vehicle_state;
+        
+        return result;
+    }
+    
+    // Wait for new frame (blocking)
+    Frame wait_for_new_frame(int last_frame_number) {
+        std::unique_lock<std::mutex> lock(cv_mtx_);
+        cv_.wait(lock, [this, last_frame_number] { 
+            if (!initialized_.load(std::memory_order_acquire)) return false;
+            int idx = read_idx_.load(std::memory_order_acquire);
+            return buffers_[idx].frame_number > last_frame_number;
+        });
+        lock.unlock();
+        
+        return read();
+    }
+
+private:
+    Frame buffers_[2];  // Ping-pong buffers
+    std::atomic<int> read_idx_;  // Which buffer to read from (0 or 1)
+    std::atomic<bool> initialized_;  // Has first frame been written?
+    std::mutex cv_mtx_;  // For condition variable only
+    std::condition_variable cv_;
 };
 
 // Timestamped frame
@@ -238,11 +314,11 @@ std::vector<cv::Point2f> transformPixelsToMeters(const std::vector<cv::Point2f>&
 void captureThread(
     const std::string& source,
     bool is_camera,
-    ThreadSafeQueue<TimestampedFrame>& queue_lateral,
-    ThreadSafeQueue<TimestampedFrame>& queue_longitudinal,
+    DoubleFrameBuffer& shared_buffer,
     PerformanceMetrics& metrics,
     std::atomic<bool>& running,
-    CanInterface* can_interface = nullptr)
+    CanInterface* can_interface = nullptr,
+    double target_fps = 10.0)
 {
     cv::VideoCapture cap;
 
@@ -262,15 +338,20 @@ void captureThread(
 
     int frame_width = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
     int frame_height = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
-     double fps = cap.get(cv::CAP_PROP_FPS);
+     double source_fps = cap.get(cv::CAP_PROP_FPS);
 
      std::cout << "Source opened: " << frame_width << "x" << frame_height
-               << " @ " << fps << " FPS\n" << std::endl;
+               << " @ " << source_fps << " FPS" << std::endl;
+     std::cout << "Capture rate: " << target_fps << " FPS (synchronized)" << std::endl;
 
      if (!is_camera) {
     int total_frames = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_COUNT));
-    std::cout << "Total frames: " << total_frames << std::endl;
+    std::cout << "Total frames: " << total_frames << "\n" << std::endl;
      }
+
+    // Calculate frame interval for target FPS
+    auto frame_interval = std::chrono::microseconds(static_cast<long>(1000000.0 / target_fps));
+    auto next_frame_time = steady_clock::now();
 
     int frame_number = 0;
     while (running.load()) {
@@ -281,7 +362,7 @@ void captureThread(
              if (is_camera) {
                  std::cerr << "Camera error" << std::endl;
              } else {
-            std::cout << "End of video stream" << std::endl;
+            std::cout << "\nEnd of video stream" << std::endl;
              }
             break;
         }
@@ -296,42 +377,22 @@ void captureThread(
         if (can_interface) {
             can_interface->update(); // Poll socket
             current_state = can_interface->getState();
-            std::cout << "CAN State: " << current_state.steering_angle_deg << std::endl;
         }
 
-        // Clone frame for lateral (will be cropped in-place)
-        // MUST clone because VideoCapture reuses the frame buffer!
-        TimestampedFrame tf_lateral;
-        tf_lateral.frame = frame.clone();  // Independent copy
-        tf_lateral.frame_number = frame_number;
-        tf_lateral.timestamp = t_end;
-        tf_lateral.vehicle_state = current_state;
-        
-        // Clone frame for longitudinal (needs full uncropped frame)
-        TimestampedFrame tf_long;
-        tf_long.frame = frame.clone();  // Independent copy
-        tf_long.frame_number = frame_number;
-        tf_long.timestamp = t_end;
-        tf_long.vehicle_state = current_state;
-        
-        // Debug: Verify clones
-        std::cout << "[Capture Frame " << frame_number << "] Lateral: " 
-                  << tf_lateral.frame.cols << "x" << tf_lateral.frame.rows 
-                  << " empty=" << tf_lateral.frame.empty()
-                  << ", Long: " << tf_long.frame.cols << "x" << tf_long.frame.rows 
-                  << " empty=" << tf_long.frame.empty() << std::endl;
+        // Write to double buffer (broadcasts to both lateral and longitudinal)
+        shared_buffer.write(frame, frame_number, t_end, current_state);
         
         frame_number++;
         
-        // Broadcast to both queues (parallel processing)
-        queue_lateral.push(tf_lateral);
-        queue_longitudinal.push(tf_long);
+        // Enforce target FPS (10 FPS for synchronized inference)
+        next_frame_time += frame_interval;
+        std::this_thread::sleep_until(next_frame_time);
     }
 
     running.store(false);
-    queue_lateral.stop();
-    queue_longitudinal.stop();
     cap.release();
+    
+    std::cout << "\nCapture thread finished. Total frames processed: " << frame_number << std::endl;
 }
 
 /**
@@ -339,7 +400,7 @@ void captureThread(
  */
 void lateralInferenceThread(
     EgoLanesEngine& engine,
-    ThreadSafeQueue<TimestampedFrame>& input_queue,
+    DoubleFrameBuffer& input_buffer,
     ThreadSafeQueue<InferenceResult>& output_queue,
     PerformanceMetrics& metrics,
     std::atomic<bool>& running,
@@ -365,37 +426,31 @@ void lateralInferenceThread(
      // Pre-allocated concatenation buffer for AutoSteer input [1, 6, 80, 160]
      std::vector<float> autosteer_input_buffer(6 * 80 * 160);  // 76,800 floats 
 
+    int last_frame_number = -1;
 
     while (running.load()) {
-        TimestampedFrame tf = input_queue.pop();
-        if (tf.frame.empty()) {
-            std::cerr << "[Lateral] Received empty frame from queue!" << std::endl;
+        // Wait for new frame from double buffer
+        DoubleFrameBuffer::Frame frame_data = input_buffer.wait_for_new_frame(last_frame_number);
+        
+        if (frame_data.frame.empty()) {
+            std::cerr << "[Lateral] Received empty frame from buffer!" << std::endl;
             continue;
         }
+        
+        last_frame_number = frame_data.frame_number;
 
         auto t_inference_start = steady_clock::now();
         
-        // Debug: Check frame before crop
-        std::cout << "[Lateral Frame " << tf.frame_number << "] Before crop: " 
-                  << tf.frame.cols << "x" << tf.frame.rows 
-                  << " empty=" << tf.frame.empty() << std::endl;
-        
-        // Crop frame and clone to avoid ROI issues
-        // ROI creates a shallow reference, so we need to clone for safety
-        tf.frame = tf.frame(cv::Rect(
+        // Crop frame for lateral inference (EgoLanes expects cropped input)
+        cv::Mat cropped_frame = frame_data.frame(cv::Rect(
             0,
             420,
-            tf.frame.cols,
-            tf.frame.rows - 420
-        )).clone();  //  Clone the ROI to get independent data
-        
-        // Debug: Check frame after crop
-        std::cout << "[Lateral Frame " << tf.frame_number << "] After crop+clone: " 
-                  << tf.frame.cols << "x" << tf.frame.rows 
-                  << " empty=" << tf.frame.empty() << std::endl;
+            frame_data.frame.cols,
+            frame_data.frame.rows - 420
+        )).clone();  // Clone the ROI to get independent data
 
         // Run Ego Lanes inference
-        LaneSegmentation raw_lanes = engine.inference(tf.frame, threshold);
+        LaneSegmentation raw_lanes = engine.inference(cropped_frame, threshold);
 
         // ========================================
         // AUTOSTEER INTEGRATION
@@ -431,7 +486,7 @@ void lateralInferenceThread(
         LaneSegmentation filtered_lanes = lane_filter.update(raw_lanes);
 
          // Further processing with lane tracker
-         cv::Size frame_size(tf.frame.cols, tf.frame.rows);
+         cv::Size frame_size(cropped_frame.cols, cropped_frame.rows);
          std::pair<LaneSegmentation, DualViewMetrics> track_result = lane_tracker.update(
              filtered_lanes,
              frame_size
@@ -483,7 +538,7 @@ void lateralInferenceThread(
               
               // 5. Print output (cross-track error, yaw error, curvature, lane width + variances + steering)
               if (path_output.fused_valid) {
-                  std::cout << "[Frame " << tf.frame_number << "] "
+                  std::cout << "[Frame " << frame_data.frame_number << "] "
                             << "CTE: " << std::fixed << std::setprecision(3) << path_output.cte << " m "
                             << "(var: " << path_output.cte_variance << "), "
                             << "Yaw: " << path_output.yaw_error << " rad "
@@ -509,7 +564,7 @@ void lateralInferenceThread(
                   std::cout << std::endl;
               } else if (egolanes_tensor_buffer.full()) {
                   // If PathFinder is not valid but AutoSteer is running, still log AutoSteer
-                  std::cout << "[Frame " << tf.frame_number << "] "
+                  std::cout << "[Frame " << frame_data.frame_number << "] "
                             << "AutoSteer: " << std::fixed << std::setprecision(2) << autosteer_steering << " deg "
                             << "(PathFinder: invalid)" << std::endl;
               }
@@ -523,27 +578,18 @@ void lateralInferenceThread(
           }
           // ========================================
 
-        // Package result (frame is already cropped in-place)
+        // Package result (use cropped frame)
         InferenceResult result;
-        result.frame = tf.frame.clone();  // ⭐ Must clone for display thread!
-        
-        // Debug: Check frame before resize
-        std::cout << "[Lateral Frame " << tf.frame_number << "] Before resize: " 
-                  << result.frame.cols << "x" << result.frame.rows 
-                  << " empty=" << result.frame.empty() 
-                  << " continuous=" << result.frame.isContinuous() << std::endl;
+        result.frame = cropped_frame.clone();  // ⭐ Must clone for display thread!
         
         // Resize frame to 640x320 for Rerun logging (only if Rerun enabled, but prepare anyway)
-        // ⭐ Use result.frame (cloned copy) instead of tf.frame to avoid corruption
         if (!result.frame.empty() && result.frame.cols > 0 && result.frame.rows > 0) {
             cv::resize(result.frame, result.resized_frame_320x640, cv::Size(640, 320), 0, 0, cv::INTER_AREA);
-        } else {
-            std::cerr << "[Lateral Frame " << tf.frame_number << "] ERROR: Cannot resize empty/invalid frame!" << std::endl;
         }
         result.lanes = final_lanes;
         result.metrics = final_metrics;
-        result.frame_number = tf.frame_number;
-        result.capture_time = tf.timestamp;
+        result.frame_number = frame_data.frame_number;
+        result.capture_time = frame_data.timestamp;
         result.inference_time = t_inference_end;
         result.steering_angle_raw = steering_angle_raw;  // Store raw PID output (before filtering)
         result.steering_angle = steering_angle;  // Store filtered PID output (final steering)
@@ -551,7 +597,7 @@ void lateralInferenceThread(
         result.autosteer_angle = autosteer_steering;  // Store AutoSteer angle
         result.autosteer_valid = egolanes_tensor_buffer.full();
         result.lane_departure_warning = lane_departure_warning;
-        result.vehicle_state = tf.vehicle_state;  // Copy CAN bus data
+        result.vehicle_state = frame_data.vehicle_state;  // Copy CAN bus data
         output_queue.push(result);
     }
 
@@ -564,7 +610,7 @@ void lateralInferenceThread(
 void longitudinalInferenceThread(
     AutoSpeedOnnxEngine& autospeed_engine,
     ObjectFinder& object_finder,
-    ThreadSafeQueue<TimestampedFrame>& input_queue,
+    DoubleFrameBuffer& input_buffer,
     ThreadSafeQueue<LongitudinalResult>& output_queue,
     PerformanceMetrics& metrics,
     std::atomic<bool>& running,
@@ -572,29 +618,30 @@ void longitudinalInferenceThread(
     float iou_thresh
 )
 {
+    int last_frame_number = -1;
+    
     while (running.load()) {
-        TimestampedFrame tf = input_queue.pop();
-        if (tf.frame.empty()) {
-            std::cerr << "[Longitudinal] Received empty frame from queue!" << std::endl;
+        // Wait for new frame from double buffer
+        DoubleFrameBuffer::Frame frame_data = input_buffer.wait_for_new_frame(last_frame_number);
+        
+        if (frame_data.frame.empty()) {
+            std::cerr << "[Longitudinal] Received empty frame from buffer!" << std::endl;
             continue;
         }
+        
+        last_frame_number = frame_data.frame_number;
 
         auto t_inference_start = steady_clock::now();
-        
-        // Debug: Check frame
-        std::cout << "[Longitudinal Frame " << tf.frame_number << "] Frame: " 
-                  << tf.frame.cols << "x" << tf.frame.rows 
-                  << " empty=" << tf.frame.empty() << std::endl;
 
-        // 1. Run AutoSpeed detection
+        // 1. Run AutoSpeed detection (uses full frame)
         std::vector<Detection> detections = autospeed_engine.inference(
-            tf.frame, 
+            frame_data.frame, 
             conf_thresh, 
             iou_thresh
         );
 
         // 2. Run ObjectFinder tracking and get CIPO
-        TrackingResult tracking_result = object_finder.updateAndGetCIPO(detections, tf.frame);
+        TrackingResult tracking_result = object_finder.updateAndGetCIPO(detections, frame_data.frame);
 
         auto t_inference_end = steady_clock::now();
 
@@ -605,7 +652,7 @@ void longitudinalInferenceThread(
 
         // Log tracking summary
         if (tracking_result.cipo.exists) {
-            std::cout << "[Longitudinal Frame " << tf.frame_number << "] "
+            std::cout << "[Longitudinal Frame " << frame_data.frame_number << "] "
                       << "CIPO: Track " << tracking_result.cipo.track_id 
                       << " (Class " << tracking_result.cipo.class_id << ") "
                       << "@ " << std::fixed << std::setprecision(1) 
@@ -621,17 +668,17 @@ void longitudinalInferenceThread(
             std::cout << std::endl;
         }
 
-        // Package result (frame already cloned by capture thread)
+        // Package result
         LongitudinalResult result;
-        result.frame = tf.frame.clone();  //Must clone for display thread!
+        result.frame = frame_data.frame.clone();  // Clone for display thread!
         result.tracked_objects = tracking_result.tracked_objects;
         result.cipo = tracking_result.cipo;
-        result.frame_number = tf.frame_number;
-        result.capture_time = tf.timestamp;
+        result.frame_number = frame_data.frame_number;
+        result.capture_time = frame_data.timestamp;
         result.inference_time = t_inference_end;
         result.cut_in_detected = tracking_result.cut_in_detected;
         result.kalman_reset = tracking_result.kalman_reset;
-        result.vehicle_state = tf.vehicle_state;
+        result.vehicle_state = frame_data.vehicle_state;
         
         output_queue.push(result);
     }
@@ -1347,11 +1394,11 @@ int main(int argc, char** argv)
     }
 
     // Thread-safe queues with bounded size (prevents memory overflow)
-    ThreadSafeQueue<TimestampedFrame> capture_queue(5);   // Max 5 frames waiting for inference
-    ThreadSafeQueue<InferenceResult> display_queue(5);    // Max 5 frames waiting for display
+    // Double buffer for synchronized frame sharing (capture -> both inference threads)
+    DoubleFrameBuffer shared_frame_buffer;
     
-    // Longitudinal pipeline queues (separate from lateral, parallel execution)
-    ThreadSafeQueue<TimestampedFrame> capture_queue_long(5);   // Longitudinal capture queue
+    // Display queues (inference -> display threads)
+    ThreadSafeQueue<InferenceResult> display_queue(5);    // Max 5 frames waiting for display
     ThreadSafeQueue<LongitudinalResult> display_queue_long(5); // Longitudinal display queue
 
     // Performance metrics
@@ -1394,14 +1441,14 @@ int main(int argc, char** argv)
     std::cout << "\nNOTE: Lateral and Longitudinal pipelines running in PARALLEL (unsynchronized for now)" << std::endl;
     std::cout << "========================================\n" << std::endl;
 
-    // Launch threads - single capture broadcasts to both pipelines
+    // Launch threads - single capture broadcasts to both pipelines via double buffer
     std::thread t_capture(captureThread, source, is_camera, 
-                          std::ref(capture_queue), std::ref(capture_queue_long),
-                          std::ref(metrics), std::ref(running), can_interface.get());
+                          std::ref(shared_frame_buffer),
+                          std::ref(metrics), std::ref(running), can_interface.get(), 10.0);  // 10 FPS
     
-    // Lateral pipeline
+    // Lateral pipeline (reads from shared buffer)
     std::thread t_lateral_inference(lateralInferenceThread, std::ref(engine),
-                            std::ref(capture_queue), std::ref(display_queue),
+                            std::ref(shared_frame_buffer), std::ref(display_queue),
                             std::ref(metrics), std::ref(running), threshold,
                             path_finder.get(),
                             steering_controller.get(),
@@ -1415,11 +1462,11 @@ int main(int argc, char** argv)
                           std::ref(running), enable_viz, save_video, output_video_path, csv_log_path);
 #endif
 
-    // Longitudinal pipeline (parallel execution, same frames from single capture)
+    // Longitudinal pipeline (reads from shared buffer, parallel execution)
     std::thread t_longitudinal_inference(longitudinalInferenceThread, 
                                         std::ref(*autospeed_engine),
                                         std::ref(*object_finder),
-                                        std::ref(capture_queue_long), 
+                                        std::ref(shared_frame_buffer), 
                                         std::ref(display_queue_long),
                                         std::ref(metrics), 
                                         std::ref(running),
