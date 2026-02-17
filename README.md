@@ -1,4 +1,4 @@
-# Autoware - Open Source Autonomous Highway Pilot
+# Vision Pilot - ADAS and Self Driving
 
 <p align="center">
     <picture>
@@ -20,14 +20,14 @@
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-0077B5?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/the-autoware-foundation)
 [![YouTube](https://img.shields.io/badge/YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white)](https://www.youtube.com/@autowarefoundation)
 [![Website](https://img.shields.io/badge/website-000000?style=for-the-badge&logo=About.me&logoColor=white)](https://autoware.org/)
-
-<img src="/Media/hero_GIF.gif" width="100%">
-
 ⭐ Star us on GitHub — your support motivates us a lot!
 
 </div>
 
 ## Open-source highway autonomy system
+
+<img src="/Media/hero_GIF.gif" width="100%">
+
 This codebase contains **productionizable and safety certifiable code for an open-source highway autonomy** system that can power safe, SAE Level-4+, autonomous driving around the world. It is designed to be integrated with automotive OEMs and Tier-1 suppliers in series production privately owned passenger vehicles.
 
 To learn more about how to participate in this project, please read the [onboarding guide](/ONBOARDING.md)
