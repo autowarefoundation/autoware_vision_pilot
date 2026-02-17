@@ -250,6 +250,33 @@ struct LongitudinalResult {
     CanVehicleState vehicle_state;
 };
 
+// Unified result combining lateral and longitudinal for synchronized visualization
+struct UnifiedResult {
+    // Frame data (use uncropped full frame from longitudinal)
+    cv::Mat full_frame;
+    int frame_number;
+    steady_clock::time_point capture_time;
+    
+    // Lateral results
+    LaneSegmentation lanes;
+    DualViewMetrics metrics;
+    double steering_angle_raw = 0.0;
+    double steering_angle = 0.0;
+    PathFinderOutput path_output;
+    float autosteer_angle = 0.0f;
+    bool autosteer_valid = false;
+    bool lane_departure_warning = false;
+    
+    // Longitudinal results
+    std::vector<TrackedObject> tracked_objects;
+    CIPOInfo cipo;
+    bool cut_in_detected = false;
+    bool kalman_reset = false;
+    
+    // CAN data
+    CanVehicleState vehicle_state;
+};
+
 // Performance metrics
 struct PerformanceMetrics {
     std::atomic<long> total_capture_us{0};
@@ -687,7 +714,271 @@ void longitudinalInferenceThread(
 }
 
 /**
- * @brief Display thread - handles visualization and video saving
+ * @brief Unified synchronized display thread - merges lateral + longitudinal results
+ */
+void unifiedDisplayThread(
+    ThreadSafeQueue<InferenceResult>& lateral_queue,
+    ThreadSafeQueue<LongitudinalResult>& longitudinal_queue,
+    PerformanceMetrics& metrics,
+    std::atomic<bool>& running,
+    bool enable_viz,
+    bool save_video,
+    const std::string& output_video_path,
+    const std::string& csv_log_path,
+    CanInterface* can_interface = nullptr
+#ifdef ENABLE_RERUN
+    , autoware_pov::vision::rerun_integration::RerunLogger* rerun_logger = nullptr
+#endif
+)
+{
+    // Frame buffers for synchronization
+    std::map<int, InferenceResult> lateral_buffer;
+    std::map<int, LongitudinalResult> long_buffer;
+    
+    // Visualization setup
+    int window_width = 1280;
+    int window_height = 720;
+    if (enable_viz) {
+        cv::namedWindow("VisionPilot - Unified", cv::WINDOW_NORMAL);
+        cv::resizeWindow("VisionPilot - Unified", window_width, window_height);
+    }
+
+    // Video writer setup
+    cv::VideoWriter video_writer;
+    bool video_writer_initialized = false;
+
+    if (save_video && enable_viz) {
+        std::cout << "Video saving enabled. Output: " << output_video_path << std::endl;
+    }
+
+    // CSV logger
+    std::ofstream csv_file;
+    csv_file.open(csv_log_path);
+    if (csv_file.is_open()) {
+        csv_file << "frame_id,timestamp_ms,"
+                 << "orig_lane_offset,orig_yaw_offset,orig_curvature,"
+                 << "pathfinder_cte,pathfinder_yaw_error,pathfinder_curvature,"
+                 << "pid_steering_raw_deg,pid_steering_filtered_deg,"
+                 << "autosteer_angle_deg,autosteer_valid,"
+                 << "cipo_exists,cipo_distance_m,cipo_velocity_ms\n";
+        std::cout << "CSV logging enabled: " << csv_log_path << std::endl;
+    }
+
+    // Load steering wheel images
+    std::string predSteeringImagePath = std::string(VISIONPILOT_SHARE_DIR) + "/images/wheel_green.png";
+    cv::Mat predSteeringWheelImg = cv::imread(predSteeringImagePath, cv::IMREAD_UNCHANGED);
+    std::string gtSteeringImagePath = std::string(VISIONPILOT_SHARE_DIR) + "/images/wheel_white.png";
+    cv::Mat gtSteeringWheelImg = cv::imread(gtSteeringImagePath, cv::IMREAD_UNCHANGED);
+    
+    if (predSteeringWheelImg.empty()) {
+        predSteeringWheelImg = cv::Mat(100, 100, CV_8UC4, cv::Scalar(0, 255, 0, 255));
+    }
+    if (gtSteeringWheelImg.empty()) {
+        gtSteeringWheelImg = cv::Mat(100, 100, CV_8UC4, cv::Scalar(255, 255, 255, 255));
+    }
+
+    int frame_count = 0;
+    
+    while (running.load()) {
+        // Poll both queues
+        InferenceResult lat_result;
+        if (lateral_queue.try_pop(lat_result)) {
+            lateral_buffer[lat_result.frame_number] = lat_result;
+        }
+        
+        LongitudinalResult long_result;
+        if (longitudinal_queue.try_pop(long_result)) {
+            long_buffer[long_result.frame_number] = long_result;
+        }
+        
+        // Find matching frame numbers and create unified visualization
+        auto lat_it = lateral_buffer.begin();
+        while (lat_it != lateral_buffer.end()) {
+            int frame_num = lat_it->first;
+            
+            if (long_buffer.count(frame_num)) {
+                // Both results available for this frame!
+                auto& lat = lat_it->second;
+                auto& lon = long_buffer[frame_num];
+                
+                frame_count++;
+                auto t_display_start = steady_clock::now();
+                
+                // ===== CREATE UNIFIED VISUALIZATION =====
+                // Use full uncropped frame from longitudinal
+                cv::Mat unified_frame = lon.frame.clone();
+                
+                // 1. Draw longitudinal tracking (bounding boxes, CIPO)
+                std::vector<Detection> empty_detections;
+                drawTrackedObjects(unified_frame, empty_detections, lon.tracked_objects, 
+                                 lon.cipo, lon.cut_in_detected, lon.kalman_reset);
+                
+                // 2. Draw lateral lanes on the cropped region (420 pixels down)
+                // Create ROI for the cropped area where lanes are detected
+                cv::Rect lane_roi(0, 420, unified_frame.cols, unified_frame.rows - 420);
+                cv::Mat lane_region = unified_frame(lane_roi);
+                
+                // Resize lanes to match cropped region
+                cv::Mat lane_vis;
+                cv::resize(lane_region, lane_vis, cv::Size(640, 320));
+                
+                // Draw lane masks
+                drawRawMasksInPlace(lane_vis, lat.lanes);
+                
+                // Resize back and copy to ROI
+                cv::resize(lane_vis, lane_region, lane_region.size());
+                
+                // 3. Add steering wheel visualization (on full frame)
+                cv::Mat display_frame;
+                cv::resize(unified_frame, display_frame, cv::Size(1280, 720));
+                
+                float steering_angle = lat.steering_angle;
+                cv::Mat rotatedPredSteeringWheelImg = rotateSteeringWheel(predSteeringWheelImg, steering_angle);
+                
+                std::optional<float> gtSteeringAngle;
+                cv::Mat rotatedGtSteeringWheelImg;
+                if (can_interface) {
+                    if (can_interface->getState().is_valid && can_interface->getState().is_steering_angle) {
+                        gtSteeringAngle = can_interface->getState().steering_angle_deg;
+                        if (gtSteeringAngle.has_value()) {
+                            rotatedGtSteeringWheelImg = rotateSteeringWheel(gtSteeringWheelImg, gtSteeringAngle.value());
+                        }
+                    }
+                }
+                
+                visualizeSteering(display_frame, steering_angle, rotatedPredSteeringWheelImg, 
+                                gtSteeringAngle, rotatedGtSteeringWheelImg);
+                
+                // 4. Add lane departure warning
+                if (lat.lane_departure_warning) {
+                    showLaneDepartureWarning(display_frame);
+                }
+                
+                // 5. Add frame number and sync indicator
+                cv::putText(display_frame, "Frame: " + std::to_string(frame_num), 
+                          cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 1.0, 
+                          cv::Scalar(0, 255, 255), 2);
+                cv::putText(display_frame, "SYNCHRONIZED", 
+                          cv::Point(10, 70), cv::FONT_HERSHEY_SIMPLEX, 0.8, 
+                          cv::Scalar(0, 255, 0), 2);
+                
+                // ===== DISPLAY =====
+                if (enable_viz) {
+                    // Initialize video writer on first frame
+                    if (save_video && !video_writer_initialized) {
+                        int fourcc = cv::VideoWriter::fourcc('a', 'v', 'c', '1');
+                        video_writer.open(output_video_path, fourcc, 10.0, 
+                                        display_frame.size(), true);
+                        
+                        if (video_writer.isOpened()) {
+                            std::cout << "Video writer initialized (H.264): " 
+                                     << display_frame.cols << "x" << display_frame.rows 
+                                     << " @ 10 fps" << std::endl;
+                            video_writer_initialized = true;
+                        } else {
+                            std::cerr << "Failed to initialize video writer" << std::endl;
+                            save_video = false;
+                        }
+                    }
+                    
+                    if (save_video && video_writer_initialized) {
+                        video_writer.write(display_frame);
+                    }
+                    
+                    cv::imshow("VisionPilot - Unified", display_frame);
+                    
+                    if (cv::waitKey(1) == 'q') {
+                        running.store(false);
+                        break;
+                    }
+                }
+                
+                // ===== CSV LOGGING =====
+                if (csv_file.is_open()) {
+                    auto ms_since_epoch = duration_cast<milliseconds>(
+                        lat.capture_time.time_since_epoch()).count();
+                    
+                    csv_file << lat.frame_number << "," << ms_since_epoch << ","
+                             << lat.metrics.orig_lane_offset << ","
+                             << lat.metrics.orig_yaw_offset << ","
+                             << lat.metrics.orig_curvature << ","
+                             << (lat.path_output.fused_valid ? lat.path_output.cte : 0.0) << ","
+                             << (lat.path_output.fused_valid ? lat.path_output.yaw_error : 0.0) << ","
+                             << (lat.path_output.fused_valid ? lat.path_output.curvature : 0.0) << ","
+                             << std::fixed << std::setprecision(6) << lat.steering_angle_raw << ","
+                             << lat.steering_angle << ","
+                             << lat.autosteer_angle << ","
+                             << (lat.autosteer_valid ? 1 : 0) << ","
+                             << (lon.cipo.exists ? 1 : 0) << ","
+                             << lon.cipo.distance_m << ","
+                             << lon.cipo.velocity_ms << "\n";
+                }
+                
+                // ===== METRICS =====
+                auto t_display_end = steady_clock::now();
+                long display_us = duration_cast<microseconds>(
+                    t_display_end - t_display_start).count();
+                metrics.total_display_us.fetch_add(display_us);
+                
+                if (metrics.measure_latency && frame_count % 30 == 0) {
+                    std::cout << "\n========================================" << std::endl;
+                    std::cout << "Synchronized Frames: " << frame_count << std::endl;
+                    std::cout << "Buffered: Lateral=" << lateral_buffer.size() 
+                             << ", Long=" << long_buffer.size() << std::endl;
+                    std::cout << "========================================" << std::endl;
+                }
+                
+#ifdef ENABLE_RERUN
+                if (rerun_logger && rerun_logger->isEnabled()) {
+                    long inference_time_us = duration_cast<microseconds>(
+                        lat.inference_time - lat.capture_time).count();
+                    cv::Mat resized_for_rerun;
+                    cv::resize(display_frame, resized_for_rerun, cv::Size(640, 320));
+                    rerun_logger->logData(lat.frame_number, lat.resized_frame_320x640,
+                                         lat.lanes, resized_for_rerun, lat.vehicle_state,
+                                         lat.steering_angle_raw, lat.steering_angle,
+                                         lat.autosteer_angle, lat.path_output,
+                                         inference_time_us);
+                }
+#endif
+                
+                // Clean up processed frames
+                lat_it = lateral_buffer.erase(lat_it);
+                long_buffer.erase(frame_num);
+            } else {
+                ++lat_it;
+            }
+        }
+        
+        // Clean up old frames (if one pipeline is lagging >10 frames behind)
+        while (lateral_buffer.size() > 10) {
+            lateral_buffer.erase(lateral_buffer.begin());
+        }
+        while (long_buffer.size() > 10) {
+            long_buffer.erase(long_buffer.begin());
+        }
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    // Cleanup
+    if (save_video && video_writer_initialized && video_writer.isOpened()) {
+        video_writer.release();
+        std::cout << "\nVideo saved to: " << output_video_path << std::endl;
+    }
+    
+    if (csv_file.is_open()) {
+        csv_file.close();
+        std::cout << "CSV log saved." << std::endl;
+    }
+    
+    if (enable_viz) {
+        cv::destroyAllWindows();
+    }
+}
+
+/**
+ * @brief Display thread - handles visualization and video saving (LEGACY - use unifiedDisplayThread instead)
  */
 void displayThread(
     ThreadSafeQueue<InferenceResult>& queue,
@@ -1421,7 +1712,9 @@ int main(int argc, char** argv)
     std::cout << "PathFinder: ENABLED (polynomial fitting + Bayes filter)" << std::endl;
     std::cout << "Steering Control: ENABLED" << std::endl;
     std::cout << "AutoSteer: ENABLED (temporal steering prediction)" << std::endl;
-    std::cout << "Longitudinal Tracking: ENABLED (AutoSpeed + ObjectFinder) - PARALLEL MODE" << std::endl;
+    std::cout << "Longitudinal Tracking: ENABLED (AutoSpeed + ObjectFinder)" << std::endl;
+    std::cout << "Synchronization: Double Buffer @ 10 FPS" << std::endl;
+    std::cout << "Visualization: UNIFIED (lateral + longitudinal overlayed)" << std::endl;
     if (can_interface) {
         std::cout << "CAN Interface: ENABLED (Ground Truth)" << std::endl;
     }
@@ -1430,7 +1723,6 @@ int main(int argc, char** argv)
     }
     if (save_video && enable_viz) {
         std::cout << "Video saving: ENABLED -> " << output_video_path << std::endl;
-        std::cout << "Longitudinal video: ENABLED -> " << output_video_path + ".long.mp4" << std::endl;
     }
     if (enable_viz) {
         std::cout << "Press 'q' in any video window to quit" << std::endl;
@@ -1453,14 +1745,6 @@ int main(int argc, char** argv)
                             path_finder.get(),
                             steering_controller.get(),
                             autosteer_engine.get());
-#ifdef ENABLE_RERUN
-    std::thread t_display(displayThread, std::ref(display_queue), std::ref(metrics),
-                          std::ref(running), enable_viz, save_video, output_video_path, csv_log_path,
-                          rerun_logger.get());
-#else
-    std::thread t_display(displayThread, std::ref(display_queue), std::ref(metrics),
-                          std::ref(running), enable_viz, save_video, output_video_path, csv_log_path);
-#endif
 
     // Longitudinal pipeline (reads from shared buffer, parallel execution)
     std::thread t_longitudinal_inference(longitudinalInferenceThread, 
@@ -1472,20 +1756,27 @@ int main(int argc, char** argv)
                                         std::ref(running),
                                         autospeed_conf_thresh,
                                         autospeed_iou_thresh);
-    std::thread t_display_long(longitudinalDisplayThread, 
-                              std::ref(display_queue_long), 
-                              std::ref(metrics),
-                              std::ref(running), 
-                              enable_viz, 
-                              save_video, 
-                              output_video_path + ".long.mp4");
+
+    // Unified display thread (merges lateral + longitudinal visualization)
+#ifdef ENABLE_RERUN
+    std::thread t_display(unifiedDisplayThread, 
+                          std::ref(display_queue), std::ref(display_queue_long),
+                          std::ref(metrics), std::ref(running), 
+                          enable_viz, save_video, output_video_path, csv_log_path,
+                          can_interface.get(), rerun_logger.get());
+#else
+    std::thread t_display(unifiedDisplayThread, 
+                          std::ref(display_queue), std::ref(display_queue_long),
+                          std::ref(metrics), std::ref(running), 
+                          enable_viz, save_video, output_video_path, csv_log_path,
+                          can_interface.get());
+#endif
 
     // Wait for all threads
     t_capture.join();
     t_lateral_inference.join();
-    t_display.join();
     t_longitudinal_inference.join();
-    t_display_long.join();
+    t_display.join();
 
     std::cout << "\nInference pipeline stopped." << std::endl;
 
