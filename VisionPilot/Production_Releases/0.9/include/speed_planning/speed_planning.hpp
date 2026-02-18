@@ -29,17 +29,24 @@ public:
      * @param cipo_distance         // Distance of CIPO
      * @param ego_speed             // Absolute speed of ego car
      * @param absolute_cipo_speed   // Absolute speed of CIPO
+     * @param is_cipo_present       // Bool indicating whether ther is a CIPO
      */
     SpeedPlanner(
                        double relative_cipo_speed,
                        double cipo_distance,
                        double ego_speed,
-                       double absolute_cipo_speed);
+                       double absolute_cipo_speed,
+                       bool is_cipo_present);
                       
     /**
      * @brief Set the speed of the ego car
      */
     setEgoSpeed(double ego_speed);
+
+    /**
+     * @brief Set whether or not there is a CIPO
+     */
+    setIsCIPOPresent(bool is_cipo_present);
 
     /**
      * @brief Set the state of the CIPO

@@ -13,9 +13,10 @@ SpeedPlanner::SpeedPlanner(
                                        double relative_cipo_speed,
                                        double cipo_distance,
                                        double ego_speed,
-                                       double absolute_cipo_speed)
+                                       double absolute_cipo_speed,
+                                       bool is_cipo_present)
     : relative_cipo_speed(relative_cipo_speed), cipo_distance(cipo_distance), 
-    ego_speed(ego_speed), absolute_cipo_speed(absolute_cipo_speed)
+    ego_speed(ego_speed), absolute_cipo_speed(absolute_cipo_speed), is_cipo_present(is_cipo_present)
 {
     std::cout << std::fixed << std::setprecision(6); // 4 decimal places
     std::cout << "Speed planner initialized with parameters:\n"
@@ -27,6 +28,10 @@ SpeedPlanner::SpeedPlanner(
 
 SpeedPlanner::setEgoSpeed(double ego_speed){
     SpeedPlanner::ego_speed = ego_speed;
+}
+
+SpeedPlanner::setIsCIPOPresent(bool is_cipo_present){
+    SpeedPlanner::is_cipo_present = is_cipo_present;
 }
 
 SpeedPlanner::setCIPOState(double relative_cipo_speed, double cipo_distance){
@@ -56,30 +61,39 @@ double SpeedPlanner::calcSafeRSSDistance(){
 double SpeedPlanner::calcIdealDrivingSpeed();
 {   
     double acceleration = 0.0;
+    double set_speed = SpeedPlanner::ego_speed;
 
-    // We are a safe distance away from the lead car
-    if (distance >= safe_distance * 1.1){
+    // If there is a lead car
+    if(SpeedPlanner::is_cipo_present){
+
+        // We are a safe distance away from the lead car
+        if (distance >= safe_distance * 1.1 || !SpeedPlanner::is_cipo_present){
+            acceleration = 1.0;
+        }
+
+        // We are too close to the lead car
+        if(distance >= 0.5 * safe_distance && distance <= 0.9*safe_distance){
+            acceleration = -1.0;
+        }
+
+        // Forward Collision Warning and Aggressive Braking
+        if(distance < 0.5 * safe_distance && distance >= 0.25*safe_distance){
+            acceleration = -2.5;
+        }
+
+        // Automatic Emergency Braking
+        if(distance < 0.25){
+            acceleration = -5;
+        }
+    }
+    else{
+        // If there is no lead car
         acceleration = 1.0;
     }
-
-    // We are too close to the lead car
-    if(distance >= 0.5 * safe_distance && distance <= 0.9*safe_distance){
-        acceleration = -1.0;
-    }
-
-    // Forward Collision Warning and Aggressive Braking
-    if(distance < 0.5 * safe_distance && distance >= 0.25*safe_distance){
-        acceleration = -2.5;
-    }
-
-    // Automatic Emergency Braking
-    if(distance < 0.25){
-        acceleration = -5;
-    }
-
-    double set_speed = SpeedPlanner::ego_speed + acceleration*SpeedPlanningConstants::response_time;
+    
+    set_speed = SpeedPlanner::ego_speed + acceleration*SpeedPlanningConstants::response_time;
 
     return set_speed;
-
+}
 
 } // namespace autoware_pov::vision::speed_planning
