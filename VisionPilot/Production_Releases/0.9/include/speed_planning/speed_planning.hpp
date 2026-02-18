@@ -60,16 +60,25 @@ public:
     double calcSafeRSSDistance();
 
     /**
-     * @brief Calculate the driving speed the ego car should follow
-     * @return Driving speed which is sent to the speed controller to track
+     * @brief Get forward collision warning state
+     * @return Check if a forward collision warning is issued
      */
-    double calcIdealDrivingSpeed();
+    bool getFCWState();
+
+    /**
+     * @brief Get automatic emergency braking state
+     * @return Check if automatic emergency braking is ocurring
+     */
+    bool getAEBState();
+
 
 private:
     double relative_cipo_speed
     double cipo_distance;
     double ego_speed;
     double absolute_cipo_speed;
+    bool is_forward_collision_warning;
+    bool is_automatic_emergency_braking;
 };
 
 } // namespace autoware_pov::vision::speed_planning

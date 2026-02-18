@@ -24,6 +24,9 @@ SpeedPlanner::SpeedPlanner(
               << "  cipo_distance: " << cipo_distance << "\n"
               << "  ego_speed: " << ego_speed << "\n"
               << "  absolute_cipo_speed: " << absolute_cipo_speed << std::endl;
+
+    SpeedPlanner::is_forward_collision_warning = false;
+    SpeedPlanner::is_automatic_emergency_braking = false;
 }
 
 // Set the speed of the ego-car
@@ -69,6 +72,8 @@ double SpeedPlanner::calcIdealDrivingSpeed();
     double acceleration = 0.0;
     double set_speed = SpeedPlanner::ego_speed;
     double safe_distance = 100.0;
+    SpeedPlanner::is_forward_collision_warning = false;
+    SpeedPlanner::is_automatic_emergency_braking = false;
 
     // If there is a lead car
     if(SpeedPlanner::is_cipo_present){
@@ -88,11 +93,14 @@ double SpeedPlanner::calcIdealDrivingSpeed();
         // Forward Collision Warning and Aggressive Braking
         if(SpeedPlanner::distance < 0.5 * safe_distance && distance >= 0.25*safe_distance){
             acceleration = -2.5;
+            SpeedPlanner::is_forward_collision_warning = true;
         }
 
         // Automatic Emergency Braking
         if(SpeedPlanner::distance < 0.25 * safe_distance){
             acceleration = -5;
+            SpeedPlanner::is_forward_collision_warning = true;
+            SpeedPlanner::is_automatic_emergency_braking = true;
         }
     }
     else{
@@ -115,5 +123,15 @@ double SpeedPlanner::calcIdealDrivingSpeed();
 
     return set_speed;
 }
+
+// Check if there is a forward collision warning
+ bool SpeedPlanner::getFCWState(){
+    return SpeedPlanner::is_forward_collision_warning;
+ }
+
+// Check if there is automatic emergency braking
+ bool SpeedPlanner::getAEBState(){
+    return SpeedPlanner::is_automatic_emergency_braking;
+ }
 
 } // namespace autoware_pov::vision::speed_planning
