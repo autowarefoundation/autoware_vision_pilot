@@ -17,6 +17,7 @@ namespace SpeedPlanningConstants {
     constexpr double a_max_accel = 2.0;              // Max acceleration of ego car
     constexpr double a_min_brake = -1.0;             // Minimum deceleration of ego car
     constexpr double response_time = 0.1;            // Reaction time of stack (10Hz)
+    constexpr double speed_limit = 31.0;             // Speed limit of the road
 };
 
 class SpeedPlanner
