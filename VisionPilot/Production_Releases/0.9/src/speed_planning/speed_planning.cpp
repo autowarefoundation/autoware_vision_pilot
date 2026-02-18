@@ -91,7 +91,7 @@ double SpeedPlanner::calcIdealDrivingSpeed();
         acceleration = 1.0;
     }
     
-    set_speed = SpeedPlanner::ego_speed + acceleration*SpeedPlanningConstants::response_time;
+    set_speed = SpeedPlanner::ego_speed + acceleration*0.5;
 
     // Safety check to not exceed speed limit
     if(set_speed > SpeedPlanner::speed_limit){
