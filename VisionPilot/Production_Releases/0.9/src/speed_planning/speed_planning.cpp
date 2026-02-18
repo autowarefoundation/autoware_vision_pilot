@@ -26,19 +26,23 @@ SpeedPlanner::SpeedPlanner(
               << "  absolute_cipo_speed: " << absolute_cipo_speed << std::endl;
 }
 
+// Set the speed of the ego-car
 SpeedPlanner::setEgoSpeed(double ego_speed){
     SpeedPlanner::ego_speed = ego_speed;
 }
 
+// Set whether or not a CIPO is present
 SpeedPlanner::setIsCIPOPresent(bool is_cipo_present){
     SpeedPlanner::is_cipo_present = is_cipo_present;
 }
 
+// Set the state of the CIPO
 SpeedPlanner::setCIPOState(double relative_cipo_speed, double cipo_distance){
     SpeedPlanner::relative_cipo_speed = relative_cipo_speed;
     SpeedPlanner::cipo_distance = cipo_distance;
 }
 
+// Calculate the safe following distance based on Mobileye RSS
 double SpeedPlanner::calcSafeRSSDistance(){
     double cipo_absolute_speed = SpeedPlanner::relative_cipo_speed + SpeedPlanner::ego_speed
 
@@ -58,31 +62,36 @@ double SpeedPlanner::calcSafeRSSDistance(){
 
 }
 
+// Calculate the ideal driving speed based on ensuring we have a safe
+// following distance
 double SpeedPlanner::calcIdealDrivingSpeed();
 {   
     double acceleration = 0.0;
     double set_speed = SpeedPlanner::ego_speed;
+    double safe_distance = 100.0;
 
     // If there is a lead car
     if(SpeedPlanner::is_cipo_present){
 
+        safe_distance = SpeedPlanner::calcSafeRSSDistance();
+
         // We are a safe distance away from the lead car
-        if (distance >= safe_distance * 1.1 || !SpeedPlanner::is_cipo_present){
+        if (SpeedPlanner::distance >= safe_distance * 1.1 || !SpeedPlanner::is_cipo_present){
             acceleration = 1.0;
         }
 
         // We are too close to the lead car
-        if(distance >= 0.5 * safe_distance && distance <= 0.9*safe_distance){
+        if(SpeedPlanner::distance >= 0.5 * safe_distance && distance <= 0.9*safe_distance){
             acceleration = -1.0;
         }
 
         // Forward Collision Warning and Aggressive Braking
-        if(distance < 0.5 * safe_distance && distance >= 0.25*safe_distance){
+        if(SpeedPlanner::distance < 0.5 * safe_distance && distance >= 0.25*safe_distance){
             acceleration = -2.5;
         }
 
         // Automatic Emergency Braking
-        if(distance < 0.25){
+        if(SpeedPlanner::distance < 0.25 * safe_distance){
             acceleration = -5;
         }
     }
@@ -91,6 +100,7 @@ double SpeedPlanner::calcIdealDrivingSpeed();
         acceleration = 1.0;
     }
     
+    // Calculate the new set speed with a 0.5s look-ahead
     set_speed = SpeedPlanner::ego_speed + acceleration*0.5;
 
     // Safety check to not exceed speed limit
