@@ -93,6 +93,16 @@ double SpeedPlanner::calcIdealDrivingSpeed();
     
     set_speed = SpeedPlanner::ego_speed + acceleration*SpeedPlanningConstants::response_time;
 
+    // Safety check to not exceed speed limit
+    if(set_speed > SpeedPlanner::speed_limit){
+        set_speed = SpeedPlanner::speed_limit;
+    }
+
+    // Minimum speed of 0 - reverse is not considered
+    if(set_speed < 0){
+        set_speed = 0.0;
+    }
+
     return set_speed;
 }
 
