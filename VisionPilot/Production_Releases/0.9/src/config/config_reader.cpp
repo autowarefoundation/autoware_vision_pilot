@@ -30,6 +30,8 @@ Config ConfigReader::loadFromFile(const std::string& config_path) {
     config.models.cache_dir = props["models.egolanes.cache_dir"];
     config.models.threshold = parseFloat(props["models.egolanes.threshold"]);
     config.models.autosteer_path = props["models.autosteer.path"];
+    config.models.autospeed_path = props["models.autospeed.path"];
+    config.models.homography_yaml_path = props["models.homography_yaml.path"];
     
     config.steering_control.Kp = parseDouble(props["steering_control.Kp"]);
     config.steering_control.Ki = parseDouble(props["steering_control.Ki"]);

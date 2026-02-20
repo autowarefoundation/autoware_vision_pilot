@@ -25,6 +25,8 @@ struct Config {
         std::string cache_dir;
         float threshold;
         std::string autosteer_path;
+        std::string autospeed_path;        // AutoSpeed detection model
+        std::string homography_yaml_path;  // Homography calibration for ObjectFinder
     } models;
     struct {
         double Kp;

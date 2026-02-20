@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(OpenCV REQUIRED)
 find_package(Threads REQUIRED)
 find_package(Eigen3 REQUIRED)
+find_package(yaml-cpp REQUIRED)
 
 # Config reader uses properties file format (no external dependencies needed)
 
@@ -138,15 +139,39 @@ else()
     message(STATUS "ONNX Runtime: ${ONNXRUNTIME_ROOT}")
     message(STATUS "  - Library: ${ONNXRUNTIME_LIBRARY}")
     message(STATUS "  - Include: ${ONNXRUNTIME_INCLUDE_DIR}")
+    
+    # AutoSpeed inference backend (ONNX Runtime - Longitudinal)
+    add_library(autospeed_inference
+        src/inference/autospeed/onnxruntime_session.cpp
+        src/inference/autospeed/onnxruntime_engine.cpp
+    )
+    target_compile_definitions(autospeed_inference PRIVATE LOG_TYPE=0)
+    target_link_libraries(autospeed_inference
+        ${OpenCV_LIBS}
+        ${ONNXRUNTIME_LIBRARY}
+    )
+    set_target_properties(autospeed_inference PROPERTIES
+        BUILD_RPATH ${ONNXRUNTIME_LIB_DIR}
+        INSTALL_RPATH ${ONNXRUNTIME_LIB_DIR}
+    )
 endif()
 
-# Visualization module
+# Visualization module (lateral)
 add_library(visionpilot_visualization
-    src/visualization/draw_lanes.cpp
+    src/visualization/visualize.cpp
 )
 target_compile_definitions(visionpilot_visualization PRIVATE LOG_TYPE=0)  # Use non-ROS logging
 target_link_libraries(visionpilot_visualization
     visionpilot_inference
+    ${OpenCV_LIBS}
+)
+
+# Visualization module (longitudinal)
+add_library(visionpilot_visualization_long
+    src/visualization/visualize_long.cpp
+)
+target_compile_definitions(visionpilot_visualization_long PRIVATE LOG_TYPE=0)
+target_link_libraries(visionpilot_visualization_long
     ${OpenCV_LIBS}
 )
 
@@ -255,6 +280,21 @@ target_link_libraries(visionpilot_lane_tracking
     ${OpenCV_LIBS}
 )
 
+# Longitudinal tracking modules (ObjectFinder + Kalman + CIPO)
+add_library(longitudinal_tracking
+    src/tracking/object_finder.cpp
+    src/tracking/kalman_filter.cpp
+    src/tracking/cipo_history.cpp
+    src/tracking/cipo_utils.cpp
+    src/tracking/tracking_utils.cpp
+    src/tracking/feature_matching_utils.cpp
+)
+target_compile_definitions(longitudinal_tracking PRIVATE LOG_TYPE=0)
+target_link_libraries(longitudinal_tracking
+    ${OpenCV_LIBS}
+    yaml-cpp
+)
+
 # Config reader module (properties file format - no dependencies)
 add_library(config_reader
     src/config/config_reader.cpp
@@ -276,8 +316,10 @@ target_compile_definitions(visionpilot PRIVATE
 set(VISIONPILOT_LIBS
     visionpilot_inference
     visionpilot_visualization
+    visionpilot_visualization_long
     visionpilot_lane_filtering
     visionpilot_lane_tracking
+    longitudinal_tracking
     camera_utils
     path_planning
     steering_control
@@ -286,6 +328,11 @@ set(VISIONPILOT_LIBS
     ${OpenCV_LIBS}
     pthread
 )
+
+# Add AutoSpeed inference if using ONNX Runtime (not TensorRT)
+if(NOT SKIP_ORT)
+    list(APPEND VISIONPILOT_LIBS autospeed_inference)
+endif()
 
 if(ENABLE_RERUN AND RERUN_ENABLED)
     target_compile_definitions(visionpilot PRIVATE ENABLE_RERUN)
