@@ -12,6 +12,7 @@ from Models.model_components.domain_seg_network import DomainSegNetwork
 from Models.model_components.auto_speed_network import AutoSpeedNetwork
 from Models.model_components.ego_lanes_network import EgoLanesNetwork
 from Models.model_components.auto_steer_network import AutoSteerNetwork
+from Models.model_components.auto_drive.auto_drive_network import AutoDriveNetwork
 def main():
 
     # Argument parser for data root path and save path
@@ -60,6 +61,10 @@ def main():
     elif (model_name == 'AutoSteer'):
         print('Processing AutoSteer Network')
         model = AutoSteerNetwork()
+    elif (model_name == 'AutoDrive'):
+        print('Processing AutoDrive Network')
+        autodrive_builder = AutoDriveNetwork()
+        model = autodrive_builder.build_model(version='n', num_classes=4)
     else:
         raise Exception("Model name not specified correctly, please check")
 
@@ -86,6 +91,8 @@ def main():
         input_shape=(1, 3, 640, 640)
     if model_name == 'AutoSteer':
         input_shape=(1, 6, 80, 160)
+    if model_name == 'AutoDrive':
+        input_shape = (1, 3, 512, 1024)
     else:
         input_shape=(1, 3, 320, 640)
     input_data = torch.randn(input_shape)
