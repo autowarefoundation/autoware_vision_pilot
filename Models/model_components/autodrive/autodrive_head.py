@@ -8,12 +8,14 @@ class AutoDriveHead(nn.Module):
 
     Inputs
     ------
-    p5 : (B, C, H, W)  — fused P5 from AutoDriveBackbone (CTX → SPPF → C2PSA).
+    feature_prev : (B, C, H, W)  — P5 from backbone(image_prev)
+    feature_curr : (B, C, H, W)  — P5 from backbone(image_curr)
 
     Compression path
     ----------------
-    AdaptiveAvgPool2d((2, 2))  → (B, C, 2, 2)
-    flatten                    → (B, C*4)  = (B, 1024) for C=256
+    cat([feature_prev, feature_curr], dim=1)  → (B, 2C, H, W)
+    AdaptiveAvgPool2d((1, 2))                   → (B, 2C, 1, 2)
+    flatten                                   → (B, 2C*2) = (B, 1024) for C=256
 
     Shared trunk
     ------------
@@ -24,24 +26,19 @@ class AutoDriveHead(nn.Module):
     -------------
     distance_head  : Linear(512, 1) + Sigmoid
                      → d ∈ (0, 1);  distance_m = 200 * (1 - d)
-                     (d ≈ 0  →  ~200 m away,  d ≈ 1  →  right ahead)
 
     curvature_head : Linear(512, 1)  — raw regression (1/m)
-                     positive = left turn, negative = right turn (or vice versa
-                     depending on sign convention in labels)
 
-    flag_head      : Linear(512, 2)  — raw logits
-                     class 0 = no CIPO,  class 1 = CIPO present
-                     use CrossEntropyLoss during training;
-                     torch.argmax(flag_logits, dim=-1) at inference
+    flag_head      : Linear(512, 2)  — raw logits for CIPO presence
+                     (CrossEntropyLoss in training; argmax or softmax at inference)
     """
 
     def __init__(self, in_channels: int = 256):
         super().__init__()
 
-        # (B, C, H, W) → (B, C, 2, 2) → flatten → (B, C*4) = 1024 for C=256
-        self.pool = nn.AdaptiveAvgPool2d((2, 2))
-        flat_dim = in_channels * 2 * 2
+        # Two P5 maps concatenated on channel → pool to fixed 1024-d vector
+        self.pool = nn.AdaptiveAvgPool2d((1, 2))
+        flat_dim = in_channels * 2 * 2  # 256 * 4 = 1024
 
         self.fc1 = nn.Sequential(
             nn.Linear(flat_dim, 768),
@@ -54,30 +51,28 @@ class AutoDriveHead(nn.Module):
             nn.Dropout(p=0.1),
         )
 
-        # Distance: sigmoid so the raw output is always in (0, 1)
         self.distance_head = nn.Sequential(
             nn.Linear(512, 1),
             nn.Sigmoid(),
         )
 
-        # Curvature: no activation — the network learns the sign and magnitude freely
         self.curvature_head = nn.Linear(512, 1)
 
-        # CIPO presence flag: 2-class logits (no-CIPO | CIPO)
         self.flag_head = nn.Linear(512, 2)
 
-    def forward(self, p5: torch.Tensor):
-        x = self.pool(p5)   # (B, C, 2, 2)
-        x = x.flatten(1)  # (B, 1024)
+    def forward(self, feature_prev: torch.Tensor, feature_curr: torch.Tensor):
+        x = torch.cat([feature_prev, feature_curr], dim=1)
+        x = self.pool(x)
+        x = x.flatten(1)
 
-        x = self.fc1(x)                             # (B, 768)
-        x = self.fc2(x)                             # (B, 512)
+        x = self.fc1(x)
+        x = self.fc2(x)
 
-        d_norm      = self.distance_head(x)         # (B, 1)  ∈ (0,1)
-        curvature   = self.curvature_head(x)        # (B, 1)  unbounded
-        flag_logits = self.flag_head(x)             # (B, 2)  raw logits
+        d_norm = self.distance_head(x)
+        curvature = self.curvature_head(x)
+        cipo_presence = self.flag_head(x)
 
-        return d_norm, curvature, flag_logits
+        return d_norm, curvature, cipo_presence
 
     @staticmethod
     def to_distance_meters(d_norm: torch.Tensor) -> torch.Tensor:
