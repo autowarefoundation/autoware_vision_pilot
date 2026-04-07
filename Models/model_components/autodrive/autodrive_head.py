@@ -45,12 +45,12 @@ class AutoDriveHead(nn.Module):
         flat_dim = 2 * p5_h * p5_w
         self.fc1 = nn.Sequential(
             nn.Linear(flat_dim, 768),
-            nn.ReLU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.Dropout(p=0.1),
         )
         self.fc2 = nn.Sequential(
             nn.Linear(768, 512),
-            nn.ReLU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.Dropout(p=0.1),
         )
 
