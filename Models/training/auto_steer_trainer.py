@@ -24,7 +24,7 @@ loss_xp_weight = 10
 
 def train(args, params, run_dir, log_writer):
     # Model
-    model = AutoSteerNetwork().build_model(version=args.version, num_classes=4)
+    model = AutoSteerNetwork().build_model(version=args.version)
     model.cuda()
 
     # Optimizer
@@ -251,7 +251,7 @@ def val(args, params, run_dir, model=None):
 def profile(args, params):
     import thop
     shape = (1, 3, args.input_height, args.input_width)
-    model = AutoSteerNetwork().build_model(version=args.version, num_classes=4)
+    model = AutoSteerNetwork().build_model(version=args.version)
     model.eval()
     model(torch.zeros(shape))
 
