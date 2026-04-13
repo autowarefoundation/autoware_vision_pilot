@@ -27,6 +27,13 @@ Distance GT:
     d_norm = (150 - min(d, 150)) / 150  →  ∈ [0, 1]
     dist_mask=True  only when cipo_detected=True AND distance is valid.
     dist_mask=False → distance loss is zero for that sample.
+
+Curvature normalisation:
+    Raw ZOD curvature spans ≈ ±0.21 (1/m) across the full dataset.
+    CURV_SCALE = 0.21 maps that range onto [-1, 1], matching the Tanh output.
+    The dataset returns curvature / CURV_SCALE so the L1 loss operates on the
+    same ±1 scale as the head output.  To convert model predictions back to
+    physical (1/m) units: pred_1_per_m = pred_normalised * CURV_SCALE.
 """
 
 import json
@@ -54,6 +61,13 @@ _NET_W, _NET_H   = 1024, 512
 _TARGET_FOV      = 50.0   # degrees — same as AutoSpeed/run_cipo_radar
 _ZOD_HFOV_DEG   = 120.0  # fallback; overridden by calibration file
 _D_MAX           = 150.0  # metres
+
+# ── Curvature normalisation ────────────────────────────────────────────────
+# Empirical max |curvature| across the full ZOD dataset (296 k frames):
+#   min = -0.2099 (1/m)   max = +0.2090 (1/m)
+# Dividing by CURV_SCALE maps GT onto [-1, 1] — same scale as Tanh output.
+# Callers that need physical units: pred_1_per_m = pred_norm * CURV_SCALE
+CURV_SCALE: float = 0.21
 
 _IMAGENET_MEAN = [0.485, 0.456, 0.406]
 _IMAGENET_STD  = [0.229, 0.224, 0.225]
@@ -151,7 +165,8 @@ class AutoDriveDataset(Dataset):
         img_prev  : (3, 512, 1024) float tensor  — ImageNet-normalised
         img_curr  : (3, 512, 1024) float tensor
         d_norm    : scalar float ∈ [0, 1]
-        curvature : scalar float (1/m, sign flipped on horizontal flip)
+        curvature : scalar float ∈ [-1, 1]  — normalised by CURV_SCALE (0.21)
+                    (sign flipped on horizontal flip; convert to 1/m: × CURV_SCALE)
         flag      : scalar float {0.0, 1.0}  — 1 = CIPO present
         dist_mask : bool  — True = distance loss active for this sample
     """
@@ -233,11 +248,13 @@ class AutoDriveDataset(Dataset):
             img_prev, img_curr, curvature = _augment_pair(img_prev, img_curr, curvature)
 
         # 4. Normalise and convert to tensor
+        # Curvature: divide by CURV_SCALE so GT ∈ [-1, 1], matching Tanh output.
+        curv_norm = curvature / CURV_SCALE
         return {
             "img_prev":  _to_tensor(img_prev),
             "img_curr":  _to_tensor(img_curr),
             "d_norm":    torch.tensor(d_norm,    dtype=torch.float32),
-            "curvature": torch.tensor(curvature, dtype=torch.float32),
+            "curvature": torch.tensor(curv_norm, dtype=torch.float32),
             "flag":      torch.tensor(flag,      dtype=torch.float32),
             "dist_mask": torch.tensor(dist_mask, dtype=torch.bool),
         }
