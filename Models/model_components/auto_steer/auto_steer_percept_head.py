@@ -16,13 +16,13 @@ class AutoSteerPerceptHead(nn.Module):
         self.Sigmoid = nn.Sigmoid()
 
         self.up = torch.nn.Upsample(scale_factor=2)
-        self.c1 = Conv(in_ch2, 3, torch.nn.SiLU(), k=3, s=1, p=1)
-        self.c2 = Conv(in_ch2, 3, torch.nn.SiLU(), k=3, s=1, p=1)
+        self.c1 = Conv(in_ch2, 1, torch.nn.SiLU(), k=3, s=1, p=1)
+        self.c2 = Conv(in_ch2, 1, torch.nn.SiLU(), k=3, s=1, p=1)
         self.v1 = nn.Conv2d(in_ch2, in_ch4, kernel_size=(2, 1), stride=(2, 1))
         self.v2 = nn.Conv2d(in_ch2, in_ch4, kernel_size=(2, 1), stride=(2, 1))
         self.softmax = nn.Softmax(dim=-1)
-        self.h1 = nn.Conv2d(3, 3, kernel_size=(1, 16), stride=(1, 16))
-        self.h2 = nn.Conv2d(3, 3, kernel_size=(1, 16), stride=(1, 16))
+        self.h1 = nn.Conv2d(1, 1, kernel_size=(1, 16), stride=(1, 16))
+        self.h2 = nn.Conv2d(1, 1, kernel_size=(1, 16), stride=(1, 16))
         # self.h3 = nn.Conv2d(1, 1, kernel_size=(1, 2), stride=(1, 2))
         # self.height_value = nn.Linear(1024, 2)
 
@@ -46,7 +46,7 @@ class AutoSteerPerceptHead(nn.Module):
 
         row_position = torch.arange(W, dtype=torch.int, device=device)
         row_multiplier = row_position[: , None]
-        row_multiplier = row_multiplier.view(1, 1, 1, W).expand(B, 3, 1, W)
+        row_multiplier = row_multiplier.view(1, 1, 1, W).expand(B, 1, 1, W)
         lanes = lanes * row_multiplier
         lane_value = torch.sum(lanes, dim=-1, keepdim=True)
         lane_value = lane_value / W # normalize to the range [0..1]

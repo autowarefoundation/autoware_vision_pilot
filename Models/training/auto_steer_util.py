@@ -233,21 +233,21 @@ def visualize(samples, output_xp, output_h_vector, target_xp, target_h_vector):
     img_np_uint8 = (img_np * 255).astype(np.uint8)
     H, W = img_np.shape[:2]
 
-    l_xp = output_xp[first_idx][0].squeeze(-1).cpu().detach().numpy() * W  # shape (64,)
-    l_h_vector = output_h_vector[first_idx][0].squeeze(-1).cpu().detach().numpy()
-    l_h_vector = (l_h_vector >= 0.5).astype(int)
+    # l_xp = output_xp[first_idx][0].squeeze(-1).cpu().detach().numpy() * W  # shape (64,)
+    # l_h_vector = output_h_vector[first_idx][0].squeeze(-1).cpu().detach().numpy()
+    # l_h_vector = (l_h_vector >= 0.5).astype(int)
 
-    e_xp = output_xp[first_idx][1].squeeze(-1).cpu().detach().numpy() * W  # shape (64,)
-    e_h_vector = output_h_vector[first_idx][1].squeeze(-1).cpu().detach().numpy()
+    e_xp = output_xp[first_idx][0].squeeze(-1).cpu().detach().numpy() * W  # shape (64,)
+    e_h_vector = output_h_vector[first_idx][0].squeeze(-1).cpu().detach().numpy()
     e_h_vector = (e_h_vector >= 0.5).astype(int)
+    #
+    # r_xp = output_xp[first_idx][2].squeeze(-1).cpu().detach().numpy() * W  # shape (64,)
+    # r_h_vector = output_h_vector[first_idx][2].squeeze(-1).cpu().detach().numpy()
+    # r_h_vector = (r_h_vector >= 0.5).astype(int)
 
-    r_xp = output_xp[first_idx][2].squeeze(-1).cpu().detach().numpy() * W  # shape (64,)
-    r_h_vector = output_h_vector[first_idx][2].squeeze(-1).cpu().detach().numpy()
-    r_h_vector = (r_h_vector >= 0.5).astype(int)
-
-    l_xp = l_xp * l_h_vector
+    # l_xp = l_xp * l_h_vector
     e_xp = e_xp * e_h_vector
-    r_xp = r_xp * r_h_vector
+    # r_xp = r_xp * r_h_vector
 
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.imshow(img_np_uint8)
@@ -256,14 +256,14 @@ def visualize(samples, output_xp, output_h_vector, target_xp, target_h_vector):
 
     # Plot
     # Left
-    mask_l = l_xp != 0
-    ax.scatter(l_xp[mask_l], yp[mask_l], s=20, c='lime')
+    # mask_l = l_xp != 0
+    # ax.scatter(l_xp[mask_l], yp[mask_l], s=20, c='lime')
     # Ego
     mask_e = e_xp != 0
     ax.scatter(e_xp[mask_e], yp[mask_e], s=20, c='green')
     # Right
-    mask_r = r_xp != 0
-    ax.scatter(r_xp[mask_r], yp[mask_r], s=20, c='red')
+    # mask_r = r_xp != 0
+    # ax.scatter(r_xp[mask_r], yp[mask_r], s=20, c='red')
     ax.axis('off')
 
 

@@ -19,33 +19,33 @@ from Models.inference.auto_steer_infer import AutoSteerNetworkInfer
 def make_visualization(frame, xp, h_vector):
     yp = np.linspace(0, 511, 64, dtype=int)
 
-    l_xp = xp[0] * 1024
-    l_h_vector = h_vector[0]
-    l_h_vector = (l_h_vector >= 0.5).astype(int)
-    l_xp = l_xp * l_h_vector
+    # l_xp = xp[0] * 1024
+    # l_h_vector = h_vector[0]
+    # l_h_vector = (l_h_vector >= 0.5).astype(int)
+    # l_xp = l_xp * l_h_vector
 
-    e_xp = xp[1] * 1024
-    e_h_vector = h_vector[0]
+    e_xp = xp * 1024
+    e_h_vector = h_vector
     e_h_vector = (e_h_vector >= 0.5).astype(int)
     e_xp = e_xp * e_h_vector
 
-    r_xp = xp[2] * 1024
-    r_h_vector = h_vector[2]
-    r_h_vector = (r_h_vector >= 0.5).astype(int)
-    r_xp = r_xp * r_h_vector
+    # r_xp = xp[2] * 1024
+    # r_h_vector = h_vector[2]
+    # r_h_vector = (r_h_vector >= 0.5).astype(int)
+    # r_xp = r_xp * r_h_vector
 
-    # Left
-    for x, y, h in zip(l_xp, yp, l_h_vector):
-        if h == 1:
-            cv2.circle(frame, (int(x), int(y)), 3, (228, 186, 20), thickness=-1)
+    # # Left
+    # for x, y, h in zip(l_xp, yp, l_h_vector):
+    #     if h == 1:
+    #         cv2.circle(frame, (int(x), int(y)), 3, (228, 186, 20), thickness=-1)
     # Ego
     for x, y, h in zip(e_xp, yp, e_h_vector):
         if h == 1:
             cv2.circle(frame, (int(x), int(y)), 3, (0, 255, 0), thickness=-1)
     # Right
-    for x, y, h in zip(r_xp, yp, r_h_vector):
-        if h == 1:
-            cv2.circle(frame, (int(x), int(y)), 3, (180,105, 255), thickness=-1)
+    # for x, y, h in zip(r_xp, yp, r_h_vector):
+    #     if h == 1:
+    #         cv2.circle(frame, (int(x), int(y)), 3, (180,105, 255), thickness=-1)
 
 
 def main():
