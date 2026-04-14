@@ -73,15 +73,15 @@ def _collate(batch: list[dict]) -> dict:
 
 def _run_val(trainer: AutoDriveTrainer, loader: DataLoader):
     """Average validation metrics across all batches."""
-    total = dist = curv = flag = acc = mae = 0.0
+    total = dist = curv = flag = acc = mae = steer_mae = 0.0
     n = 0
     for batch in loader:
-        t, d, c, f, a, m = trainer.validate(batch)
-        total += t; dist += d; curv += c; flag += f; acc += a; mae += m
+        t, d, c, f, a, m, s = trainer.validate(batch)
+        total += t; dist += d; curv += c; flag += f; acc += a; mae += m; steer_mae += s
         n += 1
     if n == 0:
-        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-    return total/n, dist/n, curv/n, flag/n, acc/n, mae/n
+        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    return total/n, dist/n, curv/n, flag/n, acc/n, mae/n, steer_mae/n
 
 
 def main():
@@ -267,12 +267,13 @@ def main():
         print("  Validating...")
         trainer.set_eval_mode()
         with torch.no_grad():
-            v_total, v_dist, v_curv, v_flag, v_acc, v_mae = _run_val(trainer, val_loader)
+            v_total, v_dist, v_curv, v_flag, v_acc, v_mae, v_steer_mae = _run_val(trainer, val_loader)
 
-        trainer.log_val_epoch(v_total, v_dist, v_curv, v_flag, v_acc, v_mae, epoch + 1)
+        trainer.log_val_epoch(v_total, v_dist, v_curv, v_flag, v_acc, v_mae, v_steer_mae, epoch + 1)
+        trainer.save_visualization(epoch + 1, split="val")
         print(
             f"  [Val] loss {v_total:.4f}  "
-            f"c {v_curv:.4f}  d {v_dist:.4f}  f {v_flag:.4f}  "
+            f"steer_mae {v_steer_mae:.2f}°  d {v_dist:.4f}  f {v_flag:.4f} c {v_curv:.4f}"
             f"flag_acc {v_acc:.1f}%  dist_mae {v_mae:.1f} m"
         )
 
@@ -289,11 +290,11 @@ def main():
     print("\nTest set evaluation...")
     trainer.set_eval_mode()
     with torch.no_grad():
-        t_total, t_dist, t_curv, t_flag, t_acc, t_mae = _run_val(trainer, test_loader)
-    trainer.log_test(t_total, t_dist, t_curv, t_flag, t_acc, t_mae)
+        t_total, t_dist, t_curv, t_flag, t_acc, t_mae, t_steer_mae = _run_val(trainer, test_loader)
+    trainer.log_test(t_total, t_dist, t_curv, t_flag, t_acc, t_mae, t_steer_mae)
     print(
         f"[Test] loss {t_total:.4f}  "
-        f"c {t_curv:.4f}  d {t_dist:.4f}  f {t_flag:.4f}  "
+        f"steer_mae {t_steer_mae:.2f}°  d {t_dist:.4f}  f {t_flag:.4f} c {t_curv:.4f}"  
         f"flag_acc {t_acc:.1f}%  dist_mae {t_mae:.1f} m"
     )
 
