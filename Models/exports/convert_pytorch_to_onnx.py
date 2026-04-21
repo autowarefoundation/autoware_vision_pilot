@@ -5,13 +5,16 @@ import torch
 import onnx
 from argparse import ArgumentParser
 import sys
-sys.path.append('..')
+from pathlib import Path
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_REPO_ROOT))
 from Models.model_components.scene_seg_network import SceneSegNetwork
 from Models.model_components.scene_3d_network import Scene3DNetwork
 from Models.model_components.domain_seg_network import DomainSegNetwork
 from Models.model_components.auto_speed.auto_speed_network import AutoSpeedNetwork
 from Models.model_components.ego_lanes_network import EgoLanesNetwork
 from Models.model_components.auto_steer.auto_steer_network import AutoSteerNetwork
+from Models.model_components.autodrive.autodrive_network import AutoDrive
 def main():
 
     # Argument parser for data root path and save path
@@ -59,6 +62,9 @@ def main():
     elif (model_name == 'AutoSteer'):
         print('Processing AutoSteer Network')
         model = AutoSteerNetwork().build_model(version='n')
+    elif (model_name == 'AutoDrive'):
+        print('Processing AutoDrive Network')
+        model = AutoDrive()
     else:
         raise Exception("Model name not specified correctly, please check")
 
@@ -80,33 +86,56 @@ def main():
     model = model.to(device)
     model = model.eval()
 
-    # Fake input data (AutoSpeed uses 1024x512)
+    # Fake input data
     if model_name == 'AutoSpeed':
         input_shape=(1, 3, 512, 1024)
     elif model_name == 'AutoSteer':
         input_shape=(1, 3, 512, 1024)
+    elif model_name == 'AutoDrive':
+        input_shape=(1, 3, 512, 1024)
     else:
         input_shape=(1, 3, 320, 640)
-    input_data = torch.randn(input_shape)
-    input_data = input_data.to(device)
+    input_data = torch.randn(input_shape).to(device)
+    input_data_prev = torch.randn(input_shape).to(device)
 
     # Test inference
     print('Testing inference')
-    _ = model(input_data)
+    if model_name == 'AutoDrive':
+        _ = model(input_data_prev, input_data)
+    else:
+        _ = model(input_data)
 
     # Export FP32 model to onnx
     print('Converting model to ONNX at FP32 and exporting')
-    torch.onnx.export(model,                                          # model
-                    input_data,                                       # model input
-                    onnx_model_path,                                  # path
-                    export_params=True,                               # store the trained parameter weights inside the model file
-                    opset_version=18,                                 # the ONNX version to export the model to
-                    do_constant_folding=True,                         # constant folding for optimization
-                    input_names = ['input'],                          # input names
-                    output_names = ['output'],                        # output names
-                    dynamic_axes={'input' : {0 : 'batch_size'},       # variable length axes
-                                    'output' : {0 : 'batch_size'}},
-                    external_data=False)
+    if model_name == 'AutoDrive':
+        torch.onnx.export(model,                                          # model
+                        (input_data_prev, input_data),                    # model input tuple
+                        onnx_model_path,                                  # path
+                        export_params=True,                               # store the trained parameter weights inside the model file
+                        opset_version=18,                                 # the ONNX version to export the model to
+                        do_constant_folding=True,                         # constant folding for optimization
+                        input_names=['image_prev', 'image_curr'],         # input names
+                        output_names=['distance', 'curvature', 'flag_logit'], # output names
+                        dynamic_axes={
+                            'image_prev': {0: 'batch_size'},
+                            'image_curr': {0: 'batch_size'},
+                            'distance': {0: 'batch_size'},
+                            'curvature': {0: 'batch_size'},
+                            'flag_logit': {0: 'batch_size'},
+                        },
+                        external_data=False)
+    else:
+        torch.onnx.export(model,                                          # model
+                        input_data,                                       # model input
+                        onnx_model_path,                                  # path
+                        export_params=True,                               # store the trained parameter weights inside the model file
+                        opset_version=18,                                 # the ONNX version to export the model to
+                        do_constant_folding=True,                         # constant folding for optimization
+                        input_names = ['input'],                          # input names
+                        output_names = ['output'],                        # output names
+                        dynamic_axes={'input' : {0 : 'batch_size'},       # variable length axes
+                                        'output' : {0 : 'batch_size'}},
+                        external_data=False)
 
     # Run checks on exported FP32 ONNX network
     ONNX_network = onnx.load(onnx_model_path)
