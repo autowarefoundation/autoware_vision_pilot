@@ -1,4 +1,4 @@
-## AutoSteer 2.0 - ego-path line prediction
+## AutoSteer 2.0 - driving path prediction
 
 AutoSteer 2.0 is a neural network which processes camera image frames and outputs future waypoints which define the driving path of the ego-car to 'follow the road'. The network does not perform explicit lane detection and processes the entire image frame to perform end-to-end spatial path prediction. The network is designed for in-lane driving and predicts the future waypoints to continue in the ego-cars existing driving corridor.
 
