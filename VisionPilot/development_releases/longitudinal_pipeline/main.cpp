@@ -1,0 +1,2153 @@
+ /**
+ * @file main.cpp
+ * @brief Multi-threaded EgoLanes lane detection inference pipeline
+ * 
+ * Architecture:
+ * - Capture Thread: Reads frames from video source or camera
+ * - Inference Thread: Runs lane detection model
+ * - Display Thread: Optionally visualizes and saves results
+ */
+
+#ifdef SKIP_ORT
+// Use TensorRT directly
+#include "inference/tensorrt_engine.hpp"
+#include "inference/tensorrt_autosteer_engine.hpp"
+using EgoLanesEngine =
+  autoware_pov::vision::egolanes::EgoLanesTensorRTEngine;
+using AutoSteerEngine =
+  autoware_pov::vision::egolanes::AutoSteerTensorRTEngine;
+#else
+// Use ONNX Runtime
+#include "inference/onnxruntime_engine.hpp"
+#include "inference/autosteer_engine.hpp"
+using EgoLanesEngine =
+  autoware_pov::vision::egolanes::EgoLanesOnnxEngine;
+using AutoSteerEngine =
+  autoware_pov::vision::egolanes::AutoSteerOnnxEngine;
+#endif
+#include "visualization/visualize.hpp"
+#include "visualization/visualize_long.hpp"
+#include "lane_filtering/lane_filter.hpp"
+#include "lane_tracking/lane_tracking.hpp"
+#include "camera/camera_utils.hpp"
+#include "camera/camera_calibration.hpp"
+#include "path_planning/path_finder.hpp"
+#include "steering_control/steering_controller.hpp"
+#include "steering_control/steering_filter.hpp"
+#include "drivers/can_interface.hpp"
+#include "config/config_reader.hpp"
+
+// Longitudinal tracking includes
+#include "inference/autospeed/onnxruntime_engine.hpp"
+#include "tracking/object_finder.hpp"
+#include "speed_planning/speed_planning.hpp"
+#include "longitudinal/pi_controller.hpp"
+#include "publisher/visionpilot_shared_state.hpp"
+
+#ifdef ENABLE_RERUN
+#include "rerun/rerun_logger.hpp"
+#endif
+#include <opencv2/opencv.hpp>
+#include <thread>
+#include <mutex>
+#include <boost/circular_buffer.hpp>
+#include <condition_variable>
+#include <atomic>
+#include <chrono>
+#include <iostream>
+#include <iomanip>
+#include <stdexcept>
+ #include <fstream>
+ #include <sstream>
+ #include <cmath>
+ #ifndef M_PI
+ #define M_PI 3.14159265358979323846
+ #endif
+
+#ifndef VISIONPILOT_SHARE_DIR
+#define VISIONPILOT_SHARE_DIR "."
+#endif
+
+using namespace autoware_pov::vision::egolanes;
+using namespace autoware_pov::vision::camera;
+using namespace autoware_pov::vision::path_planning;
+using namespace autoware_pov::vision::steering_control;
+using namespace autoware_pov::vision::tracking;
+using namespace autoware_pov::vision::autospeed;
+using namespace autoware_pov::vision::speed_planning;
+using namespace autoware_pov::vision::longitudinal;
+using namespace autoware_pov::vision::publisher;
+using namespace autoware_pov::drivers;
+using namespace autoware_pov::config;
+using namespace std::chrono;
+
+namespace {
+
+double degToRad(
+    const double deg
+) {
+    return deg * M_PI / 180.0;
+}
+
+double readJsonDoubleOrThrow(
+    const cv::FileNode& node,
+    const std::string& key,
+    const std::string& file_path
+) {
+    const cv::FileNode value = node[key];
+    if (value.empty()) {
+        throw std::runtime_error(
+            "Missing key '" + key + "' in " + file_path
+        );
+    }
+    return static_cast<double>(value);
+}
+
+double readMountHeightOrThrow(
+    const cv::FileNode& node,
+    const std::string& file_path
+) {
+    for (
+        const auto& key : {
+            "mount_height_m", 
+            "mounting_height", 
+            "camera_height"
+        }
+    ) {
+        const cv::FileNode value = node[key];
+        if (!value.empty()) {
+            return static_cast<double>(value);
+        }
+    }
+    throw std::runtime_error(
+        "Missing mount height key in " + file_path +
+        " (expected one of: mount_height_m, mounting_height, camera_height)"
+    );
+}
+
+cv::Mat computeStandardIntrinsics(
+    const int width,
+    const int height,
+    const double hfov_deg
+) {
+    const double focal = (static_cast<double>(width) / 2.0) /
+                         std::tan(degToRad(hfov_deg) / 2.0);
+    return (cv::Mat_<double>(3, 3)
+        << focal, 0.0, static_cast<double>(width) / 2.0,
+           0.0, focal, static_cast<double>(height) / 2.0,
+           0.0, 0.0, 1.0);
+}
+
+std::unique_ptr<CameraCalibration> createCameraCalibrationFromJson(
+    const std::string& inference_camera_config_path,
+    const std::string& standard_pose_config_path
+) {
+    cv::FileStorage fs_inference(
+        inference_camera_config_path, 
+        cv::FileStorage::READ | cv::FileStorage::FORMAT_JSON
+    );
+    cv::FileStorage fs_standard(
+        standard_pose_config_path, 
+        cv::FileStorage::READ | cv::FileStorage::FORMAT_JSON
+    );
+
+    if (!fs_inference.isOpened()) {
+        throw std::runtime_error(
+            "Failed to open inference camera config: " + inference_camera_config_path
+        );
+    }
+    if (!fs_standard.isOpened()) {
+        throw std::runtime_error(
+            "Failed to open standard pose config: " + standard_pose_config_path
+        );
+    }
+
+    CameraIntrinsics inference_intrinsics;
+    fs_inference["intrinsic_matrix"] >> inference_intrinsics.K;
+    if (inference_intrinsics.K.empty()) {
+        throw std::runtime_error(
+            "Missing or invalid intrinsic_matrix in " + inference_camera_config_path
+        );
+    }
+    if (inference_intrinsics.K.type() != CV_64F) {
+        inference_intrinsics.K.convertTo(inference_intrinsics.K, CV_64F);
+    }
+
+    const cv::FileNode dist = fs_inference["distortion_coefficients"];
+    if (dist.empty()) {
+        throw std::runtime_error(
+            "Missing distortion_coefficients in " + inference_camera_config_path
+        );
+    }
+
+    // Read distortion coefficients
+    inference_intrinsics.dist_coeffs = (cv::Mat_<double>(1, 5)
+        << readJsonDoubleOrThrow(dist, "k1", inference_camera_config_path),
+           readJsonDoubleOrThrow(dist, "k2", inference_camera_config_path),
+           readJsonDoubleOrThrow(dist, "p1", inference_camera_config_path),
+           readJsonDoubleOrThrow(dist, "p2", inference_camera_config_path),
+           readJsonDoubleOrThrow(dist, "k3", inference_camera_config_path));
+
+    // Read inference frame dimensions
+    inference_intrinsics.width = static_cast<int>(readJsonDoubleOrThrow(fs_inference.root(), "img_width", inference_camera_config_path));
+    inference_intrinsics.height = static_cast<int>(readJsonDoubleOrThrow(fs_inference.root(), "img_height", inference_camera_config_path));
+
+    // Read inference extrinsics (pitch yaw roll in degs, mounting height in meters)
+    CameraExtrinsics inference_extrinsics;
+    inference_extrinsics.pitch_rad = degToRad(readJsonDoubleOrThrow(fs_inference.root(), "pitch", inference_camera_config_path));
+    inference_extrinsics.yaw_rad = degToRad(readJsonDoubleOrThrow(fs_inference.root(), "yaw", inference_camera_config_path));
+    inference_extrinsics.roll_rad = degToRad(readJsonDoubleOrThrow(fs_inference.root(), "roll", inference_camera_config_path));
+    inference_extrinsics.mount_height_m = readMountHeightOrThrow(fs_inference.root(), inference_camera_config_path);
+
+    // Read standard intrinsics
+    CameraIntrinsics standard_intrinsics;
+    standard_intrinsics.width = static_cast<int>(readJsonDoubleOrThrow(fs_standard.root(), "img_width", standard_pose_config_path));
+    standard_intrinsics.height = static_cast<int>(readJsonDoubleOrThrow(fs_standard.root(), "img_height", standard_pose_config_path));
+    const double standard_hfov = readJsonDoubleOrThrow(fs_standard.root(), "hfov", standard_pose_config_path);
+    standard_intrinsics.K = computeStandardIntrinsics(standard_intrinsics.width,standard_intrinsics.height,standard_hfov);
+    standard_intrinsics.dist_coeffs = cv::Mat::zeros(1, 5, CV_64F);
+
+    // Read standard extrinsics (pitch yaw roll in degs, mounting height in meters)
+    CameraExtrinsics standard_extrinsics;
+    standard_extrinsics.pitch_rad = degToRad(readJsonDoubleOrThrow(fs_standard.root(), "pitch", standard_pose_config_path));
+    standard_extrinsics.yaw_rad = degToRad(readJsonDoubleOrThrow(fs_standard.root(), "yaw", standard_pose_config_path));
+    standard_extrinsics.roll_rad = degToRad(readJsonDoubleOrThrow(fs_standard.root(), "roll", standard_pose_config_path));
+    standard_extrinsics.mount_height_m = readMountHeightOrThrow(fs_standard.root(), standard_pose_config_path);
+
+    return std::make_unique<CameraCalibration>(
+        inference_intrinsics,
+        inference_extrinsics,
+        standard_intrinsics,
+        standard_extrinsics
+    );
+}
+
+}  // namespace
+
+// Thread-safe queue with max size limit (for display results only)
+template<typename T>
+class ThreadSafeQueue {
+public:
+    explicit ThreadSafeQueue(size_t max_size = 10) : max_size_(max_size) {}
+
+    void push(const T& item) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        // Wait if queue is full (backpressure)
+        cond_not_full_.wait(lock, [this] { 
+            return queue_.size() < max_size_ || !active_; 
+        });
+        if (!active_) return;
+        
+        queue_.push(item);
+        cond_not_empty_.notify_one();
+    }
+
+    bool try_pop(T& item) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (queue_.empty()) {
+            return false;
+        }
+        item = queue_.front();
+        queue_.pop();
+        cond_not_full_.notify_one();  // Notify that space is available
+        return true;
+    }
+
+    T pop() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cond_not_empty_.wait(lock, [this] { return !queue_.empty() || !active_; });
+        if (!active_ && queue_.empty()) {
+            return T();
+        }
+        T item = queue_.front();
+        queue_.pop();
+        cond_not_full_.notify_one();  // Notify that space is available
+        return item;
+    }
+
+    void stop() {
+        active_ = false;
+        cond_not_empty_.notify_all();
+        cond_not_full_.notify_all();
+    }
+
+    size_t size() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return queue_.size();
+    }
+
+private:
+    std::queue<T> queue_;
+    std::mutex mutex_;
+    std::condition_variable cond_not_empty_;
+    std::condition_variable cond_not_full_;
+    std::atomic<bool> active_{true};
+    size_t max_size_;
+};
+
+// ========================================
+// DOUBLE FRAME BUFFER for synchronized frame sharing
+// ========================================
+// Uses ping-pong buffering: capture writes to one buffer while inference reads from the other.
+// Zero lock contention, perfect for 10 FPS with <100ms inference.
+class DoubleFrameBuffer {
+public:
+    struct Frame {
+        cv::Mat frame;
+        int frame_number;
+        steady_clock::time_point timestamp;
+        CanVehicleState vehicle_state;
+    };
+
+    DoubleFrameBuffer() : read_idx_(0), initialized_(false) {}
+
+    // Capture thread writes new frame
+    void write(const cv::Mat& new_frame, int frame_number, 
+               steady_clock::time_point timestamp, 
+               const CanVehicleState& vehicle_state) {
+        int write_idx = 1 - read_idx_.load(std::memory_order_acquire);
+        
+        // Write to the non-active buffer (no locks needed!)
+        buffers_[write_idx].frame = new_frame.clone();
+        buffers_[write_idx].frame_number = frame_number;
+        buffers_[write_idx].timestamp = timestamp;
+        buffers_[write_idx].vehicle_state = vehicle_state;
+        
+        // Atomic swap: make this buffer readable
+        read_idx_.store(write_idx, std::memory_order_release);
+        initialized_.store(true, std::memory_order_release);
+        
+        // Notify waiting threads
+        cv_.notify_all();
+    }
+
+    // Inference threads read latest frame
+    Frame read() {
+        // Wait for first frame
+        std::unique_lock<std::mutex> lock(cv_mtx_);
+        cv_.wait(lock, [this] { return initialized_.load(std::memory_order_acquire); });
+        lock.unlock();
+        
+        // Read from current buffer (no locks, atomic read)
+        int idx = read_idx_.load(std::memory_order_acquire);
+        
+        Frame result;
+        result.frame = buffers_[idx].frame.clone();  // Clone for thread safety
+        result.frame_number = buffers_[idx].frame_number;
+        result.timestamp = buffers_[idx].timestamp;
+        result.vehicle_state = buffers_[idx].vehicle_state;
+        
+        return result;
+    }
+    
+    // Wait for new frame (blocking)
+    Frame wait_for_new_frame(int last_frame_number) {
+        std::unique_lock<std::mutex> lock(cv_mtx_);
+        cv_.wait(lock, [this, last_frame_number] { 
+            if (!initialized_.load(std::memory_order_acquire)) return false;
+            int idx = read_idx_.load(std::memory_order_acquire);
+            return buffers_[idx].frame_number > last_frame_number;
+        });
+        lock.unlock();
+        
+        return read();
+    }
+
+private:
+    Frame buffers_[2];  // Ping-pong buffers
+    std::atomic<int> read_idx_;  // Which buffer to read from (0 or 1)
+    std::atomic<bool> initialized_;  // Has first frame been written?
+    std::mutex cv_mtx_;  // For condition variable only
+    std::condition_variable cv_;
+};
+
+// Timestamped frame
+struct TimestampedFrame {
+    cv::Mat frame;
+    int frame_number;
+    steady_clock::time_point timestamp;
+    CanVehicleState vehicle_state; // Ground truth from CAN
+};
+
+// Inference result
+struct InferenceResult {
+    cv::Mat frame;
+    cv::Mat resized_frame_320x640;  // Resized frame for Rerun logging (320x640)
+    LaneSegmentation lanes;
+    DualViewMetrics metrics;
+    int frame_number;
+    steady_clock::time_point capture_time;
+    steady_clock::time_point inference_time;
+    double steering_angle_raw = 0.0;  // Raw PID output before filtering (degrees)
+    double steering_angle = 0.0;  // Filtered PID output (final steering, degrees)
+    PathFinderOutput path_output; // Added for metric debug
+    float autosteer_angle = 0.0f;  // Steering angle from AutoSteer (degrees)
+    bool autosteer_valid = false;  // Whether AutoSteer ran (skips first frame)
+    bool lane_departure_warning = false; // Whether the vehicle is drifting outside the driving corridor
+    CanVehicleState vehicle_state; // CAN bus data from capture thread
+};
+
+// Longitudinal tracking result (for parallel execution without sync)
+struct LongitudinalResult {
+    cv::Mat frame;
+    std::vector<TrackedObject> tracked_objects;
+    CIPOInfo cipo;
+    int frame_number;
+    steady_clock::time_point capture_time;
+    steady_clock::time_point inference_time;
+    bool cut_in_detected = false;
+    bool kalman_reset = false;
+    CanVehicleState vehicle_state;
+
+    // Speed planning outputs
+    double ideal_speed_ms  = 0.0;   // Commanded set-speed from RSS planner (m/s)
+    double safe_distance_m = 0.0;   // Computed RSS d_min (m); 0 when no CIPO
+    bool   fcw_active      = false; // Forward Collision Warning
+    bool   aeb_active      = false; // Automatic Emergency Braking
+
+    // Longitudinal control output
+    double control_effort_ms2 = 0.0; // PID controller output: acceleration/deceleration (m/s²)
+};
+
+// Unified result combining lateral and longitudinal for synchronized visualization
+struct UnifiedResult {
+    // Frame data (use uncropped full frame from longitudinal)
+    cv::Mat full_frame;
+    int frame_number;
+    steady_clock::time_point capture_time;
+    
+    // Lateral results
+    LaneSegmentation lanes;
+    DualViewMetrics metrics;
+    double steering_angle_raw = 0.0;
+    double steering_angle = 0.0;
+    PathFinderOutput path_output;
+    float autosteer_angle = 0.0f;
+    bool autosteer_valid = false;
+    bool lane_departure_warning = false;
+    
+    // Longitudinal results
+    std::vector<TrackedObject> tracked_objects;
+    CIPOInfo cipo;
+    bool cut_in_detected = false;
+    bool kalman_reset = false;
+
+    // Speed planning outputs
+    double ideal_speed_ms  = 0.0;
+    double safe_distance_m = 0.0;
+    bool   fcw_active      = false;
+    bool   aeb_active      = false;
+
+    // Longitudinal control output
+    double control_effort_ms2 = 0.0;
+
+    // CAN data
+    CanVehicleState vehicle_state;
+};
+
+// Performance metrics
+struct PerformanceMetrics {
+    std::atomic<long> total_capture_us{0};
+    std::atomic<long> total_inference_us{0};
+    std::atomic<long> total_display_us{0};
+    std::atomic<long> total_end_to_end_us{0};
+    std::atomic<int> frame_count{0};
+    bool measure_latency{true};
+};
+
+/**
+ * @brief Transform BEV pixel coordinates to BEV metric coordinates (meters)
+ * 
+ * Transformation based on 640x640 BEV image:
+ * Input (Pixels):
+ *   - Origin (0,0) at Top-Left
+ *   - x right, y down
+ *   - Vehicle at Bottom-Center (320, 640)
+ * 
+ * Output (Meters):
+ *   - Origin (0,0) at Vehicle Position
+ *   - x right (lateral), y forward (longitudinal)
+ *   - Range: X [-20m, 20m], Y [0m, 40m]
+ *   - Scale: 640 pixels = 40 meters
+ * 
+ * @param bev_pixels BEV points in pixel coordinates (from LaneTracker)
+ * @return BEV points in metric coordinates (meters, x=lateral, y=longitudinal)
+ */
+std::vector<cv::Point2f> transformPixelsToMeters(const std::vector<cv::Point2f>& bev_pixels) {
+    std::vector<cv::Point2f> bev_meters;
+    
+    if (bev_pixels.empty()) {
+        return bev_meters;
+    }
+    
+    
+    const double bev_width_px = 640.0;
+    const double bev_height_px = 640.0;
+    const double bev_range_m = 40.0;
+    
+    const double scale = bev_range_m / bev_height_px; // 40m / 640px = 0.0625 m/px
+    const double center_x = bev_width_px / 2.0;       // 320.0
+    const double origin_y = bev_height_px;            // 640.0 (bottom)
+    //check again
+    for (const auto& pt : bev_pixels) {
+        bev_meters.push_back(cv::Point2f(
+            (pt.x - center_x) * scale,       // Lateral: (x - 320) * scale  
+            (origin_y - pt.y) * scale       // Longitudinal: (640 - y) * scale (Flip Y to match image origin)
+        ));
+    }
+    
+    return bev_meters;
+}
+
+/**
+ * @brief Unified capture thread - handles both video files and cameras
+ * @param queue_lateral Output queue for lateral pipeline
+ * @param queue_longitudinal Output queue for longitudinal pipeline
+ * 
+ * Broadcasts frames to both lateral and longitudinal queues for parallel processing
+ */
+void captureThread(
+    const std::string& source,
+    bool is_camera,
+    DoubleFrameBuffer& shared_buffer,
+    PerformanceMetrics& metrics,
+    std::atomic<bool>& running,
+    CanInterface* can_interface = nullptr,
+    CameraCalibration* camera_calibration = nullptr,
+    double target_fps = 10.0)
+{
+    cv::VideoCapture cap;
+
+     if (is_camera) {
+         std::cout << "Opening camera: " << source << std::endl;
+         cap = openCamera(source);
+     } else {
+         std::cout << "Opening video: " << source << std::endl;
+         cap.open(source);
+     }
+
+    if (!cap.isOpened()) {
+         std::cerr << "Failed to open source: " << source << std::endl;
+        running.store(false);
+        return;
+    }
+
+    int frame_width = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
+    int frame_height = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
+     double source_fps = cap.get(cv::CAP_PROP_FPS);
+
+     std::cout << "Source opened: " << frame_width << "x" << frame_height
+               << " @ " << source_fps << " FPS" << std::endl;
+     std::cout << "Capture rate: " << target_fps << " FPS (synchronized)" << std::endl;
+
+     if (!is_camera) {
+    int total_frames = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_COUNT));
+    std::cout << "Total frames: " << total_frames << "\n" << std::endl;
+     }
+
+    // Calculate frame interval for target FPS
+    auto frame_interval = std::chrono::microseconds(static_cast<long>(1000000.0 / target_fps));
+    auto next_frame_time = steady_clock::now();
+
+    int frame_number = 0;
+    bool calibration_error_logged = false;
+    while (running.load()) {
+        auto t_start = steady_clock::now();
+        
+        cv::Mat frame;
+         if (!cap.read(frame) || frame.empty()) {
+             if (is_camera) {
+                 std::cerr << "Camera error" << std::endl;
+             } else {
+            std::cout << "\nEnd of video stream" << std::endl;
+             }
+            break;
+        }
+
+         auto t_end = steady_clock::now();
+
+        long capture_us = duration_cast<microseconds>(t_end - t_start).count();
+        metrics.total_capture_us.fetch_add(capture_us);
+
+        // Poll CAN interface if available
+        CanVehicleState current_state;
+        if (can_interface) {
+            can_interface->update(); // Poll socket
+            current_state = can_interface->getState();
+        }
+
+        if (camera_calibration) {
+            try {
+                cv::Mat calibrated_frame = camera_calibration->processFrame(frame);
+
+                // Keep output dimensions stable for downstream modules that assume source size
+                if (calibrated_frame.size() != frame.size()) {
+                    cv::resize(
+                        calibrated_frame, 
+                        frame, frame.size(), 
+                        0, 0, 
+                        cv::INTER_LINEAR
+                    );
+                } else {
+                    frame = calibrated_frame;
+                }
+            } catch (const std::exception& e) {
+                if (!calibration_error_logged) {
+                    std::cerr << "[CameraCalibration] Frame processing failed, continuing with raw frames: "
+                              << e.what() << std::endl;
+                    calibration_error_logged = true;
+                }
+            }
+        }
+
+        // Write to double buffer (broadcasts to both lateral and longitudinal)
+        shared_buffer.write(frame, frame_number, t_end, current_state);
+        
+        frame_number++;
+        
+        // Enforce target FPS (10 FPS for synchronized inference)
+        next_frame_time += frame_interval;
+        std::this_thread::sleep_until(next_frame_time);
+    }
+
+    running.store(false);
+    cap.release();
+    
+    std::cout << "\nCapture thread finished. Total frames processed: " << frame_number << std::endl;
+}
+
+/**
+ * @brief Inference thread - runs lane detection model
+ */
+void lateralInferenceThread(
+    EgoLanesEngine& engine,
+    DoubleFrameBuffer& input_buffer,
+    ThreadSafeQueue<InferenceResult>& output_queue,
+    PerformanceMetrics& metrics,
+    std::atomic<bool>& running,
+     float threshold,
+     PathFinder* path_finder = nullptr,
+     SteeringController* steering_controller = nullptr,
+     AutoSteerEngine* autosteer_engine = nullptr
+)
+{
+    // Init lane filter
+    LaneFilter lane_filter(0.5f);
+
+     // Init lane tracker
+     LaneTracker lane_tracker;
+
+     // Init SteeringFilter
+     SteeringFilter steering_filter(0.05f);  
+     // AutoSteer: Circular buffer for raw EgoLanes tensors [1, 3, 80, 160]
+     // Stores copies of last 2 frames for temporal inference
+     const int EGOLANES_TENSOR_SIZE = 3 * 80 * 160;  // 38,400 floats per frame
+     boost::circular_buffer<std::vector<float>> egolanes_tensor_buffer(2);
+     
+     // Pre-allocated concatenation buffer for AutoSteer input [1, 6, 80, 160]
+     std::vector<float> autosteer_input_buffer(6 * 80 * 160);  // 76,800 floats 
+
+    int last_frame_number = -1;
+
+    while (running.load()) {
+        // Wait for new frame from double buffer
+        DoubleFrameBuffer::Frame frame_data = input_buffer.wait_for_new_frame(last_frame_number);
+        
+        if (frame_data.frame.empty()) {
+            std::cerr << "[Lateral] Received empty frame from buffer!" << std::endl;
+            continue;
+        }
+        
+        last_frame_number = frame_data.frame_number;
+
+        auto t_inference_start = steady_clock::now();
+        
+        // Crop frame for lateral inference (EgoLanes expects cropped input)
+        cv::Mat cropped_frame = frame_data.frame(cv::Rect(
+            0,
+            420,
+            frame_data.frame.cols,
+            frame_data.frame.rows - 420
+        )).clone();  // Clone the ROI to get independent data
+
+        // Run Ego Lanes inference
+        LaneSegmentation raw_lanes = engine.inference(cropped_frame, threshold);
+
+        // ========================================
+        // AUTOSTEER INTEGRATION
+        // ========================================
+        float autosteer_steering = 0.0f;
+        double steering_angle_raw = 0.0;
+        double steering_angle = 0.0;
+        
+        // 1. Copy raw EgoLanes tensor [1, 3, 80, 160] for temporal buffer
+        const float* raw_tensor = engine.getRawTensorData();
+        std::vector<float> current_tensor(EGOLANES_TENSOR_SIZE);
+        std::memcpy(current_tensor.data(), raw_tensor, EGOLANES_TENSOR_SIZE * sizeof(float));
+        
+        // 2. Store in circular buffer (auto-deletes oldest when full)
+        egolanes_tensor_buffer.push_back(std::move(current_tensor));
+        
+        // 3. Run AutoSteer only when buffer is full (skip first frame)
+        if (egolanes_tensor_buffer.full()) {
+            // Concatenate t-1 and t into pre-allocated buffer
+            std::memcpy(autosteer_input_buffer.data(), 
+                       egolanes_tensor_buffer[0].data(),  // t-1
+                       EGOLANES_TENSOR_SIZE * sizeof(float));
+            
+            std::memcpy(autosteer_input_buffer.data() + EGOLANES_TENSOR_SIZE,
+                       egolanes_tensor_buffer[1].data(),  // t
+                       EGOLANES_TENSOR_SIZE * sizeof(float));
+            
+            // Run AutoSteer inference
+            autosteer_steering = autosteer_engine->inference(autosteer_input_buffer);
+        }
+        // ========================================
+        // Post-processing with lane filter
+        LaneSegmentation filtered_lanes = lane_filter.update(raw_lanes);
+
+         // Further processing with lane tracker
+         cv::Size frame_size(cropped_frame.cols, cropped_frame.rows);
+         std::pair<LaneSegmentation, DualViewMetrics> track_result = lane_tracker.update(
+             filtered_lanes,
+             frame_size
+         );
+
+         LaneSegmentation final_lanes = track_result.first;
+         DualViewMetrics final_metrics = track_result.second;
+
+        auto t_inference_end = steady_clock::now();
+
+        // Calculate inference latency
+        long inference_us = duration_cast<microseconds>(
+            t_inference_end - t_inference_start).count();
+        metrics.total_inference_us.fetch_add(inference_us);
+
+          // ========================================
+          // PATHFINDER (Polynomial Fitting + Bayes Filter) + STEERING CONTROL
+          // ========================================
+          PathFinderOutput path_output; // Declaring at higher scope for result storage
+          path_output.fused_valid = false; // Initialize as invalid
+          bool lane_departure_warning = false; // Declare at higher scope
+          
+          if (final_metrics.bev_visuals.valid) {
+              
+              // 1. Get BEV points in PIXEL space from LaneTracker
+              std::vector<cv::Point2f> left_bev_pixels = final_metrics.bev_visuals.bev_left_pts;
+              std::vector<cv::Point2f> right_bev_pixels = final_metrics.bev_visuals.bev_right_pts;
+              
+              // 2. Transform BEV pixels → BEV meters
+              // TODO: Calibrate transformPixelsToMeters() for your specific camera
+              std::vector<cv::Point2f> left_bev_meters = transformPixelsToMeters(left_bev_pixels);
+              std::vector<cv::Point2f> right_bev_meters = transformPixelsToMeters(right_bev_pixels);
+              
+              // 3. Update PathFinder (polynomial fit + Bayes filter in metric space)
+              // Pass AutoSteer steering angle (replaces computed curvature)
+              path_output = path_finder->update(left_bev_meters, right_bev_meters, autosteer_steering);
+
+              // 4. Compute steering angle
+              if (path_output.fused_valid) {
+                  steering_angle_raw = steering_controller->computeSteering(
+                      path_output.cte,
+                      path_output.yaw_error * 180 / M_PI,
+                      path_output.curvature
+                  );
+              }
+
+              // Filter the raw PID output
+              steering_angle = steering_filter.filter(steering_angle_raw, 0.1);
+              
+              // 5. Print output (cross-track error, yaw error, curvature, lane width + variances + steering)
+              if (path_output.fused_valid) {
+                  std::cout << "[Frame " << frame_data.frame_number << "] "
+                            << "CTE: " << std::fixed << std::setprecision(3) << path_output.cte << " m "
+                            << "(var: " << path_output.cte_variance << "), "
+                            << "Yaw: " << path_output.yaw_error << " rad "
+                            << "(var: " << path_output.yaw_variance << "), "
+                            << "Curv: " << path_output.curvature << " 1/m "
+                            << "(var: " << path_output.curv_variance << "), "
+                            << "Width: " << path_output.lane_width << " m "
+                            << "(var: " << path_output.lane_width_variance << ")";
+                  
+                  // PID Steering output
+                  double pid_deg = steering_angle;
+                  std::cout << " | PID: " << std::setprecision(2) << pid_deg << " deg";
+                  
+                  // AutoSteer output (if valid)
+                  if (egolanes_tensor_buffer.full()) {
+                      std::cout << " | AutoSteer: " << std::setprecision(2) << autosteer_steering << " deg";
+                      
+                      // Show difference
+                      double diff = autosteer_steering - pid_deg;
+                      std::cout << " (Δ: " << std::setprecision(2) << diff << " deg)";
+                  }
+                  
+                  std::cout << std::endl;
+              } else if (egolanes_tensor_buffer.full()) {
+                  // If PathFinder is not valid but AutoSteer is running, still log AutoSteer
+                  std::cout << "[Frame " << frame_data.frame_number << "] "
+                            << "AutoSteer: " << std::fixed << std::setprecision(2) << autosteer_steering << " deg "
+                            << "(PathFinder: invalid)" << std::endl;
+              }
+
+            // 6. Issue lane departure warning if the vehicle is drifting outside the driving corridor
+            double drift_ratio = std::abs(path_output.cte)/(path_output.lane_width*0.5 + 0.000001);
+
+              if(drift_ratio > 0.5){
+                lane_departure_warning = true;
+              }
+          }
+          // ========================================
+
+        // Package result (use cropped frame)
+        InferenceResult result;
+        result.frame = cropped_frame.clone();  // ⭐ Must clone for display thread!
+        
+        // Resize frame to 640x320 for Rerun logging (only if Rerun enabled, but prepare anyway)
+        if (!result.frame.empty() && result.frame.cols > 0 && result.frame.rows > 0) {
+            cv::resize(result.frame, result.resized_frame_320x640, cv::Size(640, 320), 0, 0, cv::INTER_AREA);
+        }
+        result.lanes = final_lanes;
+        result.metrics = final_metrics;
+        result.frame_number = frame_data.frame_number;
+        result.capture_time = frame_data.timestamp;
+        result.inference_time = t_inference_end;
+        result.steering_angle_raw = steering_angle_raw;  // Store raw PID output (before filtering)
+        result.steering_angle = steering_angle;  // Store filtered PID output (final steering)
+        result.path_output = path_output;        // Store for viz
+        result.autosteer_angle = autosteer_steering;  // Store AutoSteer angle
+        result.autosteer_valid = egolanes_tensor_buffer.full();
+        result.lane_departure_warning = lane_departure_warning;
+        result.vehicle_state = frame_data.vehicle_state;  // Copy CAN bus data
+        output_queue.push(result);
+    }
+
+    output_queue.stop();
+}
+
+/**
+ * @brief Longitudinal inference thread - runs AutoSpeed detection + ObjectFinder tracking
+ */
+void longitudinalInferenceThread(
+    AutoSpeedOnnxEngine& autospeed_engine,
+    ObjectFinder& object_finder,
+    DoubleFrameBuffer& input_buffer,
+    ThreadSafeQueue<LongitudinalResult>& output_queue,
+    PerformanceMetrics& metrics,
+    std::atomic<bool>& running,
+    float conf_thresh,
+    float iou_thresh,
+    double ego_speed_ms,   // Static placeholder; replace with CAN bus value when available
+    double pid_K_p = 0.5,  // Proportional gain for longitudinal PID controller
+    double pid_K_i = 0.1,  // Integral gain
+    double pid_K_d = 0.05  // Derivative gain
+)
+{
+    int last_frame_number = -1;
+
+    // Construct SpeedPlanner once; state is updated per-frame via setters
+    SpeedPlanner speed_planner(0.0, 100.0, ego_speed_ms, ego_speed_ms, false);
+
+    // Construct longitudinal PID controller
+    PIController longitudinal_controller(pid_K_p, pid_K_i, pid_K_d);
+
+    while (running.load()) {
+        // Wait for new frame from double buffer
+        DoubleFrameBuffer::Frame frame_data = input_buffer.wait_for_new_frame(last_frame_number);
+        
+        if (frame_data.frame.empty()) {
+            std::cerr << "[Longitudinal] Received empty frame from buffer!" << std::endl;
+            continue;
+        }
+        
+        last_frame_number = frame_data.frame_number;
+
+        auto t_inference_start = steady_clock::now();
+
+        // 1. Run AutoSpeed detection (uses full frame)
+        std::vector<Detection> detections = autospeed_engine.inference(
+            frame_data.frame, 
+            conf_thresh, 
+            iou_thresh
+        );
+
+        // 2. Run ObjectFinder tracking and get CIPO
+        TrackingResult tracking_result = object_finder.updateAndGetCIPO(detections, frame_data.frame);
+
+        // 3. Run SpeedPlanner with latest CIPO state
+        // ego_speed_ms: static placeholder until CAN bridge supplies real speed
+        // relative_cipo_speed (velocity_ms): Kalman-estimated, positive = closing
+        double ideal_speed_ms  = ego_speed_ms;
+        double safe_distance_m = 0.0;
+        bool   fcw_active      = false;
+        bool   aeb_active      = false;
+
+        {
+            const CIPOInfo& cipo = tracking_result.cipo;
+            speed_planner.setEgoSpeed(ego_speed_ms);
+            speed_planner.setIsCIPOPresent(cipo.exists);
+            if (cipo.exists) {
+                speed_planner.setCIPOState(cipo.velocity_ms, cipo.distance_m);
+                safe_distance_m = speed_planner.calcSafeRSSDistance();
+            }
+            ideal_speed_ms = speed_planner.calcIdealDrivingSpeed();
+            fcw_active     = speed_planner.getFCWState();
+            aeb_active     = speed_planner.getAEBState();
+        }
+
+        // 4. Run longitudinal PID controller to compute acceleration/deceleration effort
+        double control_effort_ms2 = 0.0;
+        if (tracking_result.cut_in_detected || tracking_result.kalman_reset) {
+            // Reset controller on cut-in or Kalman reset to avoid windup
+            longitudinal_controller.reset();
+        }
+        control_effort_ms2 = longitudinal_controller.computeEffort(ego_speed_ms, ideal_speed_ms);
+
+        auto t_inference_end = steady_clock::now();
+
+        // Calculate inference latency
+        long inference_us = duration_cast<microseconds>(
+            t_inference_end - t_inference_start).count();
+        metrics.total_inference_us.fetch_add(inference_us);
+
+        // Log tracking summary
+        if (tracking_result.cipo.exists) {
+            std::cout << "[Longitudinal Frame " << frame_data.frame_number << "] "
+                      << "CIPO: Track " << tracking_result.cipo.track_id 
+                      << " (Class " << tracking_result.cipo.class_id << ") "
+                      << "@ " << std::fixed << std::setprecision(1) 
+                      << tracking_result.cipo.distance_m << "m, "
+                      << tracking_result.cipo.velocity_ms << "m/s";
+
+            std::cout << " FCW: " << speed_planner.getFCWState() << " AEB: " << speed_planner.getAEBState();
+            std::cout << " Ideal Speed: " << ideal_speed_ms << " Safe Distance: " << safe_distance_m;
+            if (tracking_result.cut_in_detected) {
+                std::cout << " [CUT-IN DETECTED]";
+            }
+            if (tracking_result.kalman_reset) {
+                std::cout << " [KALMAN RESET]";
+            }
+            std::cout << std::endl;
+        }
+
+        // Package result
+        LongitudinalResult result;
+        result.frame           = frame_data.frame.clone();
+        result.tracked_objects = tracking_result.tracked_objects;
+        result.cipo            = tracking_result.cipo;
+        result.frame_number    = frame_data.frame_number;
+        result.capture_time    = frame_data.timestamp;
+        result.inference_time  = t_inference_end;
+        result.cut_in_detected = tracking_result.cut_in_detected;
+        result.kalman_reset    = tracking_result.kalman_reset;
+        result.vehicle_state   = frame_data.vehicle_state;
+        result.ideal_speed_ms   = ideal_speed_ms;
+        result.safe_distance_m  = safe_distance_m;
+        result.fcw_active       = fcw_active;
+        result.aeb_active       = aeb_active;
+        result.control_effort_ms2 = control_effort_ms2;
+        
+        output_queue.push(result);
+    }
+
+    output_queue.stop();
+}
+
+/**
+ * @brief Unified synchronized display thread - merges lateral + longitudinal results
+ */
+void unifiedDisplayThread(
+    ThreadSafeQueue<InferenceResult>& lateral_queue,
+    ThreadSafeQueue<LongitudinalResult>& longitudinal_queue,
+    PerformanceMetrics& metrics,
+    std::atomic<bool>& running,
+    bool enable_viz,
+    bool save_video,
+    const std::string& output_video_path,
+    const std::string& csv_log_path,
+    CanInterface* can_interface = nullptr,
+    VisionPilotSharedState* shared_state = nullptr
+#ifdef ENABLE_RERUN
+    , autoware_pov::vision::rerun_integration::RerunLogger* rerun_logger = nullptr
+#endif
+)
+{
+    // Frame buffers for synchronization
+    std::map<int, InferenceResult> lateral_buffer;
+    std::map<int, LongitudinalResult> long_buffer;
+    
+    // Visualization setup
+    int window_width = 1280;
+    int window_height = 720;
+    if (enable_viz) {
+        cv::namedWindow("VisionPilot - Unified", cv::WINDOW_NORMAL);
+        cv::resizeWindow("VisionPilot - Unified", window_width, window_height);
+    }
+
+    // Video writer setup
+    cv::VideoWriter video_writer;
+    bool video_writer_initialized = false;
+
+    if (save_video && enable_viz) {
+        std::cout << "Video saving enabled. Output: " << output_video_path << std::endl;
+    }
+
+    // CSV logger
+    std::ofstream csv_file;
+    csv_file.open(csv_log_path);
+    if (csv_file.is_open()) {
+        csv_file << "frame_id,timestamp_ms,"
+                 << "orig_lane_offset,orig_yaw_offset,orig_curvature,"
+                 << "pathfinder_cte,pathfinder_yaw_error,pathfinder_curvature,"
+                 << "pid_steering_raw_deg,pid_steering_filtered_deg,"
+                 << "autosteer_angle_deg,autosteer_valid,"
+                 << "cipo_exists,cipo_distance_m,cipo_velocity_ms,"
+                 << "safe_distance_m,ideal_speed_ms,fcw_active,aeb_active,"
+                 << "control_effort_ms2\n";
+        std::cout << "CSV logging enabled: " << csv_log_path << std::endl;
+    }
+
+    // Load steering wheel images
+    std::string predSteeringImagePath = std::string(VISIONPILOT_SHARE_DIR) + "/images/wheel_green.png";
+    cv::Mat predSteeringWheelImg = cv::imread(predSteeringImagePath, cv::IMREAD_UNCHANGED);
+    std::string gtSteeringImagePath = std::string(VISIONPILOT_SHARE_DIR) + "/images/wheel_white.png";
+    cv::Mat gtSteeringWheelImg = cv::imread(gtSteeringImagePath, cv::IMREAD_UNCHANGED);
+    
+    if (predSteeringWheelImg.empty()) {
+        predSteeringWheelImg = cv::Mat(100, 100, CV_8UC4, cv::Scalar(0, 255, 0, 255));
+    }
+    if (gtSteeringWheelImg.empty()) {
+        gtSteeringWheelImg = cv::Mat(100, 100, CV_8UC4, cv::Scalar(255, 255, 255, 255));
+    }
+
+    int frame_count = 0;
+    
+    while (running.load()) {
+        // Poll both queues
+        InferenceResult lat_result;
+        if (lateral_queue.try_pop(lat_result)) {
+            lateral_buffer[lat_result.frame_number] = lat_result;
+        }
+        
+        LongitudinalResult long_result;
+        if (longitudinal_queue.try_pop(long_result)) {
+            long_buffer[long_result.frame_number] = long_result;
+        }
+        
+        // Find matching frame numbers and create unified visualization
+        auto lat_it = lateral_buffer.begin();
+        while (lat_it != lateral_buffer.end()) {
+            int frame_num = lat_it->first;
+            
+            if (long_buffer.count(frame_num)) {
+                // Both results available for this frame!
+                auto& lat = lat_it->second;
+                auto& lon = long_buffer[frame_num];
+                
+                frame_count++;
+                auto t_display_start = steady_clock::now();
+                
+                // ===== CREATE UNIFIED VISUALIZATION =====
+                // Use full uncropped frame from longitudinal
+                cv::Mat unified_frame = lon.frame.clone();
+                
+                // 1. Draw longitudinal tracking (bounding boxes, CIPO)
+                std::vector<Detection> empty_detections;
+                drawTrackedObjects(unified_frame, empty_detections, lon.tracked_objects, 
+                                 lon.cipo, lon.cut_in_detected, lon.kalman_reset);
+                
+                // 2. Draw lateral lanes on the cropped region (420 pixels down)
+                // Create ROI for the cropped area where lanes are detected
+                cv::Rect lane_roi(0, 420, unified_frame.cols, unified_frame.rows - 420);
+                cv::Mat lane_region = unified_frame(lane_roi);
+                
+                // Resize lanes to match cropped region
+                cv::Mat lane_vis;
+                cv::resize(lane_region, lane_vis, cv::Size(640, 320));
+                
+                // Draw lane masks
+                drawRawMasksInPlace(lane_vis, lat.lanes);
+                
+                // Resize back and copy to ROI
+                cv::resize(lane_vis, lane_region, lane_region.size());
+                
+                // 3. Add steering wheel visualization (on full frame)
+                cv::Mat display_frame;
+                cv::resize(unified_frame, display_frame, cv::Size(1280, 720));
+                
+                float steering_angle = lat.steering_angle;
+                cv::Mat rotatedPredSteeringWheelImg = rotateSteeringWheel(predSteeringWheelImg, steering_angle);
+                
+                std::optional<float> gtSteeringAngle;
+                cv::Mat rotatedGtSteeringWheelImg;
+                if (can_interface) {
+                    if (can_interface->getState().is_valid && can_interface->getState().is_steering_angle) {
+                        gtSteeringAngle = can_interface->getState().steering_angle_deg;
+                        if (gtSteeringAngle.has_value()) {
+                            rotatedGtSteeringWheelImg = rotateSteeringWheel(gtSteeringWheelImg, gtSteeringAngle.value());
+                        }
+                    }
+                }
+                
+                visualizeSteering(display_frame, steering_angle, rotatedPredSteeringWheelImg, 
+                                gtSteeringAngle, rotatedGtSteeringWheelImg);
+                
+                // 4. Add lane departure warning
+                if (lat.lane_departure_warning) {
+                    showLaneDepartureWarning(display_frame);
+                }
+
+                // 5. FCW / AEB overlays (longitudinal safety alerts)
+                if (lon.aeb_active) {
+                    cv::putText(display_frame, "!!! AEB ACTIVE !!!",
+                                cv::Point(display_frame.cols / 2 - 220, 120),
+                                cv::FONT_HERSHEY_DUPLEX, 1.4, cv::Scalar(0, 0, 255), 3);
+                } else if (lon.fcw_active) {
+                    cv::putText(display_frame, "! FORWARD COLLISION WARNING !",
+                                cv::Point(display_frame.cols / 2 - 300, 120),
+                                cv::FONT_HERSHEY_DUPLEX, 1.0, cv::Scalar(0, 128, 255), 2);
+                }
+
+                // 6. Ideal speed + RSS distance + Control effort HUD (top-right area)
+                if (lon.cipo.exists) {
+                    std::string speed_str = "Set: " + 
+                        [&]{ std::ostringstream ss; ss << std::fixed << std::setprecision(1)
+                             << lon.ideal_speed_ms; return ss.str(); }() + " m/s";
+                    std::string rss_str   = "d_safe: " +
+                        [&]{ std::ostringstream ss; ss << std::fixed << std::setprecision(1)
+                             << lon.safe_distance_m << "m"; return ss.str(); }();
+                    std::string effort_str = "Effort: " +
+                        [&]{ std::ostringstream ss; ss << std::fixed << std::setprecision(2)
+                             << lon.control_effort_ms2; return ss.str(); }() + " m/s²";
+                    cv::putText(display_frame, speed_str,
+                                cv::Point(display_frame.cols - 300, 30),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 255), 2);
+                    cv::putText(display_frame, rss_str,
+                                cv::Point(display_frame.cols - 300, 60),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(200, 200, 0), 2);
+                    // Color-code effort: green = accelerate, red = decelerate
+                    cv::Scalar effort_color = (lon.control_effort_ms2 >= 0) 
+                                             ? cv::Scalar(0, 255, 0)  // Green for acceleration
+                                             : cv::Scalar(0, 0, 255); // Red for deceleration
+                    cv::putText(display_frame, effort_str,
+                                cv::Point(display_frame.cols - 300, 90),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.7, effort_color, 2);
+                }
+
+                // 7. Frame number and sync indicator
+                cv::putText(display_frame, "Frame: " + std::to_string(frame_num),
+                          cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 1.0,
+                          cv::Scalar(0, 255, 255), 2);
+                cv::putText(display_frame, "SYNCHRONIZED",
+                          cv::Point(10, 70), cv::FONT_HERSHEY_SIMPLEX, 0.8,
+                          cv::Scalar(0, 255, 0), 2);
+                
+                // ===== DISPLAY =====
+                if (enable_viz) {
+                    // Initialize video writer on first frame
+                    if (save_video && !video_writer_initialized) {
+                        int fourcc = cv::VideoWriter::fourcc('a', 'v', 'c', '1');
+                        video_writer.open(output_video_path, fourcc, 10.0, 
+                                        display_frame.size(), true);
+                        
+                        if (video_writer.isOpened()) {
+                            std::cout << "Video writer initialized (H.264): " 
+                                     << display_frame.cols << "x" << display_frame.rows 
+                                     << " @ 10 fps" << std::endl;
+                            video_writer_initialized = true;
+                        } else {
+                            std::cerr << "Failed to initialize video writer" << std::endl;
+                            save_video = false;
+                        }
+                    }
+                    
+                    if (save_video && video_writer_initialized) {
+                        video_writer.write(display_frame);
+                    }
+                    
+                    cv::imshow("VisionPilot - Unified", display_frame);
+                    
+                    if (cv::waitKey(1) == 'q') {
+                        running.store(false);
+                        break;
+                    }
+                }
+                
+                // ===== CSV LOGGING =====
+                if (csv_file.is_open()) {
+                    auto ms_since_epoch = duration_cast<milliseconds>(
+                        lat.capture_time.time_since_epoch()).count();
+                    
+                    csv_file << lat.frame_number << "," << ms_since_epoch << ","
+                             << lat.metrics.orig_lane_offset << ","
+                             << lat.metrics.orig_yaw_offset << ","
+                             << lat.metrics.orig_curvature << ","
+                             << (lat.path_output.fused_valid ? lat.path_output.cte : 0.0) << ","
+                             << (lat.path_output.fused_valid ? lat.path_output.yaw_error : 0.0) << ","
+                             << (lat.path_output.fused_valid ? lat.path_output.curvature : 0.0) << ","
+                             << std::fixed << std::setprecision(6) << lat.steering_angle_raw << ","
+                             << lat.steering_angle << ","
+                             << lat.autosteer_angle << ","
+                             << (lat.autosteer_valid ? 1 : 0) << ","
+                             << (lon.cipo.exists ? 1 : 0) << ","
+                             << lon.cipo.distance_m << ","
+                             << lon.cipo.velocity_ms << ","
+                             << lon.safe_distance_m << ","
+                             << lon.ideal_speed_ms << ","
+                             << (lon.fcw_active ? 1 : 0) << ","
+                             << (lon.aeb_active ? 1 : 0) << ","
+                             << lon.control_effort_ms2 << "\n";
+                }
+                
+                // ===== SHARED-MEMORY PUBLISH =====
+                if (shared_state) {
+                    VisionPilotState ipc{};
+                    ipc.frame_number = static_cast<uint64_t>(frame_num);
+
+                    // Lateral
+                    ipc.steering_pid_deg       = lat.steering_angle;
+                    ipc.steering_pid_raw_deg   = lat.steering_angle_raw;
+                    ipc.steering_autosteer_deg = lat.autosteer_angle;
+                    ipc.autosteer_valid        = lat.autosteer_valid;
+                    ipc.cte_m                  = lat.path_output.fused_valid ? lat.path_output.cte       : 0.0;
+                    ipc.yaw_error_rad          = lat.path_output.fused_valid ? lat.path_output.yaw_error : 0.0;
+                    ipc.curvature_inv_m        = lat.path_output.fused_valid ? lat.path_output.curvature : 0.0;
+                    ipc.path_valid             = lat.path_output.fused_valid;
+                    ipc.lane_departure_warning = lat.lane_departure_warning;
+
+                    // Longitudinal
+                    ipc.cipo_exists        = lon.cipo.exists;
+                    ipc.cipo_track_id      = lon.cipo.exists ? lon.cipo.track_id   : -1;
+                    ipc.cipo_class_id      = lon.cipo.exists ? lon.cipo.class_id   : 0;
+                    ipc.cipo_distance_m    = lon.cipo.exists ? lon.cipo.distance_m : 0.0;
+                    ipc.cipo_velocity_ms   = lon.cipo.exists ? lon.cipo.velocity_ms: 0.0;
+                    ipc.cut_in_detected    = lon.cut_in_detected;
+                    ipc.kalman_reset       = lon.kalman_reset;
+                    ipc.ideal_speed_ms     = lon.ideal_speed_ms;
+                    ipc.safe_distance_m    = lon.safe_distance_m;
+                    ipc.fcw_active         = lon.fcw_active;
+                    ipc.aeb_active         = lon.aeb_active;
+                    ipc.control_effort_ms2 = lon.control_effort_ms2;
+
+                    // CAN / ego
+                    const auto& can = lon.vehicle_state;
+                    ipc.can_valid              = can.is_valid;
+                    ipc.ego_speed_ms           = can.is_valid ? (can.speed_kmph / 3.6) : 0.0;
+                    ipc.ego_steering_angle_deg = can.is_steering_angle ? can.steering_angle_deg : 0.0;
+
+                    shared_state->publish(ipc);
+                }
+
+                // ===== METRICS =====
+                auto t_display_end = steady_clock::now();
+                long display_us = duration_cast<microseconds>(
+                    t_display_end - t_display_start).count();
+                metrics.total_display_us.fetch_add(display_us);
+                
+                if (metrics.measure_latency && frame_count % 30 == 0) {
+                    std::cout << "\n========================================" << std::endl;
+                    std::cout << "Synchronized Frames: " << frame_count << std::endl;
+                    std::cout << "Buffered: Lateral=" << lateral_buffer.size() 
+                             << ", Long=" << long_buffer.size() << std::endl;
+                    std::cout << "========================================" << std::endl;
+                }
+                
+#ifdef ENABLE_RERUN
+                if (rerun_logger && rerun_logger->isEnabled()) {
+                    long inference_time_us = duration_cast<microseconds>(
+                        lat.inference_time - lat.capture_time).count();
+                    cv::Mat resized_for_rerun;
+                    cv::resize(display_frame, resized_for_rerun, cv::Size(640, 320));
+                    rerun_logger->logData(lat.frame_number, lat.resized_frame_320x640,
+                                         lat.lanes, resized_for_rerun, lat.vehicle_state,
+                                         lat.steering_angle_raw, lat.steering_angle,
+                                         lat.autosteer_angle, lat.path_output,
+                                         inference_time_us);
+                }
+#endif
+                
+                // Clean up processed frames
+                lat_it = lateral_buffer.erase(lat_it);
+                long_buffer.erase(frame_num);
+            } else {
+                ++lat_it;
+            }
+        }
+        
+        // Clean up old frames (if one pipeline is lagging >10 frames behind)
+        while (lateral_buffer.size() > 10) {
+            lateral_buffer.erase(lateral_buffer.begin());
+        }
+        while (long_buffer.size() > 10) {
+            long_buffer.erase(long_buffer.begin());
+        }
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    // Cleanup
+    if (save_video && video_writer_initialized && video_writer.isOpened()) {
+        video_writer.release();
+        std::cout << "\nVideo saved to: " << output_video_path << std::endl;
+    }
+    
+    if (csv_file.is_open()) {
+        csv_file.close();
+        std::cout << "CSV log saved." << std::endl;
+    }
+    
+    if (enable_viz) {
+        cv::destroyAllWindows();
+    }
+}
+
+/**
+ * @brief Display thread - handles visualization and video saving (LEGACY - use unifiedDisplayThread instead)
+ */
+void displayThread(
+    ThreadSafeQueue<InferenceResult>& queue,
+    PerformanceMetrics& metrics,
+    std::atomic<bool>& running,
+    bool enable_viz,
+    bool save_video,
+     const std::string& output_video_path,
+     const std::string& csv_log_path
+#ifdef ENABLE_RERUN
+    , autoware_pov::vision::rerun_integration::RerunLogger* rerun_logger = nullptr
+#endif
+)
+{
+    // Visualization setup
+     int window_width = 640;
+     int window_height = 320;
+    if (enable_viz) {
+         cv::namedWindow(
+             "EgoLanes Inference",
+             cv::WINDOW_NORMAL
+         );
+         cv::resizeWindow(
+             "EgoLanes Inference",
+             window_width,
+             window_height
+         );
+    }
+
+    // Video writer setup
+    cv::VideoWriter video_writer;
+    bool video_writer_initialized = false;
+
+    if (save_video && enable_viz) {
+        std::cout << "Video saving enabled. Output: " << output_video_path << std::endl;
+    }
+
+     // CSV logger for all steering outputs (PathFinder + PID + AutoSteer)
+     std::ofstream csv_file;
+     csv_file.open(csv_log_path);
+     if (csv_file.is_open()) {
+        // Write header
+        csv_file << "frame_id,timestamp_ms,"
+                 << "orig_lane_offset,orig_yaw_offset,orig_curvature,"
+                 << "pathfinder_cte,pathfinder_yaw_error,pathfinder_curvature,"
+                 << "pid_steering_raw_deg,pid_steering_filtered_deg,"
+                 << "autosteer_angle_deg,autosteer_valid\n";
+
+         std::cout << "CSV logging enabled: " << csv_log_path << std::endl;
+     } else {
+         std::cerr << "Error: could not open " << csv_log_path << " for writing" << std::endl;
+    }
+
+    // Load steering wheel images
+  std::string predSteeringImagePath = std::string(VISIONPILOT_SHARE_DIR) + "/images/wheel_green.png";
+  cv::Mat predSteeringWheelImg = cv::imread(predSteeringImagePath, cv::IMREAD_UNCHANGED);
+  std::string gtSteeringImagePath = std::string(VISIONPILOT_SHARE_DIR) + "/images/wheel_white.png";
+  cv::Mat gtSteeringWheelImg = cv::imread(gtSteeringImagePath, cv::IMREAD_UNCHANGED);
+  
+  // Verify steering wheel images loaded
+  if (predSteeringWheelImg.empty()) {
+      std::cerr << "ERROR: Failed to load steering wheel image: " << predSteeringImagePath << std::endl;
+      std::cerr << "VISIONPILOT_SHARE_DIR = " << VISIONPILOT_SHARE_DIR << std::endl;
+      // Create dummy image as fallback
+      predSteeringWheelImg = cv::Mat(100, 100, CV_8UC4, cv::Scalar(0, 255, 0, 255));
+  }
+  if (gtSteeringWheelImg.empty()) {
+      std::cerr << "WARNING: Failed to load GT steering wheel image: " << gtSteeringImagePath << std::endl;
+      // Create dummy image as fallback
+      gtSteeringWheelImg = cv::Mat(100, 100, CV_8UC4, cv::Scalar(255, 255, 255, 255));
+  }
+
+    while (running.load()) {
+        InferenceResult result;
+        if (!queue.try_pop(result)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+
+        auto t_display_start = steady_clock::now();
+
+        int count = metrics.frame_count.fetch_add(1) + 1;
+
+        // Prepare visualization frame (for both display and Rerun)
+        cv::Mat view_debug = result.resized_frame_320x640.clone();
+        float steering_angle = result.steering_angle;
+        cv::Mat rotatedPredSteeringWheelImg = rotateSteeringWheel(predSteeringWheelImg, steering_angle);
+
+        // Read GT steering from CAN frame
+        std::optional<float> gtSteeringAngle;
+        cv::Mat rotatedGtSteeringWheelImg;
+        if (can_interface) {
+            if (can_interface->getState().is_valid && can_interface->getState().is_steering_angle) {
+                gtSteeringAngle = can_interface->getState().steering_angle_deg;
+                if (gtSteeringAngle.has_value()) {
+                    rotatedGtSteeringWheelImg = rotateSteeringWheel(gtSteeringWheelImg, gtSteeringAngle.value());
+                }
+            }
+        }
+
+        visualizeSteering(view_debug, steering_angle, rotatedPredSteeringWheelImg, gtSteeringAngle, rotatedGtSteeringWheelImg);
+        drawRawMasksInPlace(view_debug, result.lanes);
+        showLaneDepartureWarning(view_debug);
+
+#ifdef ENABLE_RERUN
+        // Log to Rerun (independent of visualization - works even if enable_viz=false)
+        if (rerun_logger && rerun_logger->isEnabled()) {
+            long inference_time_us = duration_cast<microseconds>(
+                result.inference_time - result.capture_time
+            ).count();
+            
+            rerun_logger->logData(
+                result.frame_number,
+                result.resized_frame_320x640,
+                result.lanes,
+                view_debug,
+                result.vehicle_state,
+                result.steering_angle_raw,
+                result.steering_angle,
+                result.autosteer_angle,
+                result.path_output,
+                inference_time_us
+            );
+        }
+#endif
+
+        // Visualization
+        if (enable_viz) {
+            // drawPolyFitLanesInPlace(
+            //     view_final,
+            //     result.lanes
+            // );
+            //  drawBEVVis(
+            //      view_bev,
+            //      result.frame,
+            //      result.metrics.bev_visuals
+            //  );
+            //
+            //  // Draw Metric Debug (projected back to pixels) - only if path is valid
+            //  if (result.path_output.fused_valid) {
+            //      std::vector<double> left_coeffs(result.path_output.left_coeff.begin(), result.path_output.left_coeff.end());
+            //      std::vector<double> right_coeffs(result.path_output.right_coeff.begin(), result.path_output.right_coeff.end());
+            //      autoware_pov::vision::egolanes::drawMetricVerification(
+            //          view_bev,
+            //          left_coeffs,
+            //          right_coeffs
+            //      );
+            //  }
+            //
+            //  // 3. View layout handling
+            //  // Layout:
+            //  // | [Debug] | [ BEV (640x640) ]
+            //  // | [Final] | [ Black Space   ]
+            //
+            //  // Left col: debug (top) + final (bottom)
+            //  cv::Mat left_col;
+            // cv::vconcat(
+            //     view_debug,
+            //     view_final,
+            //      left_col
+            //  );
+            //
+            //  float left_aspect = static_cast<float>(left_col.cols) / left_col.rows;
+            //  int target_left_w = static_cast<int>(window_height * left_aspect);
+            //  cv::resize(
+            //      left_col,
+            //      left_col,
+            //      cv::Size(target_left_w, window_height)
+            //  );
+            //
+            //  // Right col: BEV (stretched to match height)
+            //  // Black canvas matching left col height
+            //  cv::Mat right_col = cv::Mat::zeros(
+            //      window_height,
+            //      640,
+            //      view_bev.type()
+            //  );
+            //  // Prep BEV
+            //  cv::Rect top_roi(
+            //      0, 0,
+            //      view_bev.cols,
+            //      view_bev.rows
+            //  );
+            //  view_bev.copyTo(right_col(top_roi));
+            //
+            //  // Final stacked view
+            //  cv::Mat stacked_view;
+            //  cv::hconcat(
+            //      left_col,
+            //      right_col,
+            //     stacked_view
+            // );
+            //
+            // // Initialize video writer on first frame
+            // if (save_video && !video_writer_initialized) {
+            //     // Use H.264 for better performance and smaller file size
+            //     // XVID is slower and creates larger files
+            //     int fourcc = cv::VideoWriter::fourcc('a', 'v', 'c', '1');  // H.264
+            //     video_writer.open(
+            //         output_video_path,
+            //         fourcc,
+            //          10.0,
+            //         stacked_view.size(),
+            //         true
+            //     );
+            //
+            //     if (video_writer.isOpened()) {
+            //         std::cout << "Video writer initialized (H.264): " << stacked_view.cols
+            //                    << "x" << stacked_view.rows << " @ 10 fps" << std::endl;
+            //         video_writer_initialized = true;
+            //     } else {
+            //         std::cerr << "Warning: Failed to initialize video writer" << std::endl;
+            //     }
+            // }
+            //
+            // // Write to video
+            // if (save_video && video_writer_initialized && video_writer.isOpened()) {
+            //     video_writer.write(stacked_view);
+            // }
+
+            // Display
+            cv::imshow("EgoLanes Inference", view_debug);
+
+            if (cv::waitKey(1) == 'q') {
+                running.store(false);
+                break;
+            }
+        }
+
+         // CSV logging: Log all frames to ensure PID and AutoSteer are captured
+         // Use 0.0 for invalid PathFinder values (can be filtered in post-processing)
+         if (csv_file.is_open()) {
+             // Timestamp calc, from captured time
+             auto ms_since_epoch = duration_cast<milliseconds>(
+                 result.capture_time.time_since_epoch()
+             ).count();
+
+             csv_file << result.frame_number << ","
+                      << ms_since_epoch << ","
+                      // Orig metrics (for reference, but not used for tuning)
+                      << result.metrics.orig_lane_offset << ","
+                      << result.metrics.orig_yaw_offset << ","
+                      << result.metrics.orig_curvature << ","
+                      // PathFinder filtered metrics (NaN or 0.0 when invalid)
+                      << (result.path_output.fused_valid ? result.path_output.cte : 0.0) << ","
+                      << (result.path_output.fused_valid ? result.path_output.yaw_error : 0.0) << ","
+                      << (result.path_output.fused_valid ? result.path_output.curvature : 0.0) << ","
+                      // PID Controller steering angles (all in degrees)
+                      << std::fixed << std::setprecision(6) << result.steering_angle_raw << ","
+                      << result.steering_angle << ","
+                      // AutoSteer steering angle (degrees) and validity
+                      << result.autosteer_angle << ","
+                      << (result.autosteer_valid ? 1 : 0) << "\n";
+        }
+
+        auto t_display_end = steady_clock::now();
+
+        // Calculate latencies
+        long display_us = duration_cast<microseconds>(
+            t_display_end - t_display_start).count();
+        long end_to_end_us = duration_cast<microseconds>(
+            t_display_end - result.capture_time).count();
+
+        metrics.total_display_us.fetch_add(display_us);
+        metrics.total_end_to_end_us.fetch_add(end_to_end_us);
+
+        // Print metrics every 30 frames
+        if (metrics.measure_latency && count % 30 == 0) {
+            long avg_capture = metrics.total_capture_us.load() / count;
+            long avg_inference = metrics.total_inference_us.load() / count;
+            long avg_display = metrics.total_display_us.load() / count;
+            long avg_e2e = metrics.total_end_to_end_us.load() / count;
+
+            std::cout << "\n========================================\n";
+            std::cout << "Frames processed: " << count << "\n";
+            std::cout << "Pipeline Latencies:\n";
+            std::cout << "  1. Capture:       " << std::fixed << std::setprecision(2)
+                     << (avg_capture / 1000.0) << " ms\n";
+            std::cout << "  2. Inference:     " << (avg_inference / 1000.0)
+                     << " ms (" << (1000000.0 / avg_inference) << " FPS capable)\n";
+            std::cout << "  3. Display:       " << (avg_display / 1000.0) << " ms\n";
+            std::cout << "  4. End-to-End:    " << (avg_e2e / 1000.0) << " ms\n";
+            std::cout << "Throughput: " << (count / (avg_e2e * count / 1000000.0)) << " FPS\n";
+            std::cout << "========================================\n";
+        }
+    }
+
+     // Cleanups
+
+     // Video writer
+    if (save_video && video_writer_initialized && video_writer.isOpened()) {
+        video_writer.release();
+        std::cout << "\nVideo saved to: " << output_video_path << std::endl;
+    }
+
+     // Vis
+    if (enable_viz) {
+        cv::destroyAllWindows();
+    }
+
+     // CSV logger
+     if (csv_file.is_open()) {
+         csv_file.close();
+         std::cout << "CSV log saved." << std::endl;
+    }
+}
+
+/**
+ * @brief Longitudinal display thread - handles visualization of tracking results
+ */
+void longitudinalDisplayThread(
+    ThreadSafeQueue<LongitudinalResult>& queue,
+    PerformanceMetrics& metrics,
+    std::atomic<bool>& running,
+    bool enable_viz,
+    bool save_video,
+    const std::string& output_video_path
+)
+{
+    // Visualization setup
+    int window_width = 640;
+    int window_height = 320;
+    
+    if (enable_viz) {
+        cv::namedWindow("Longitudinal Tracking", cv::WINDOW_NORMAL);
+        cv::resizeWindow("Longitudinal Tracking", window_width, window_height);
+    }
+
+    // Video writer setup
+    cv::VideoWriter video_writer;
+    bool video_writer_initialized = false;
+
+    if (save_video && enable_viz) {
+        std::cout << "Longitudinal video saving enabled. Output: " << output_video_path << std::endl;
+    }
+
+    while (running.load()) {
+        LongitudinalResult result;
+        if (!queue.try_pop(result)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+
+        auto t_display_start = steady_clock::now();
+
+        if (enable_viz) {
+            // Prepare visualization frame (only when viz enabled)
+            cv::Mat vis_frame = result.frame.clone();
+            
+            // Draw tracked objects and CIPO (pass empty detections vector)
+            std::vector<Detection> empty_detections;
+            drawTrackedObjects(vis_frame, empty_detections, result.tracked_objects, 
+                          result.cipo, result.cut_in_detected, result.kalman_reset);
+            cv::imshow("Longitudinal Tracking", vis_frame);
+            
+            // Initialize video writer on first frame
+            if (save_video && !video_writer_initialized) {
+                int fourcc = cv::VideoWriter::fourcc('a', 'v', 'c', '1');  // H.264
+                video_writer.open(
+                    output_video_path,
+                    fourcc,
+                    10.0,
+                    vis_frame.size(),
+                    true
+                );
+                
+                if (video_writer.isOpened()) {
+                    std::cout << "Longitudinal video writer initialized (H.264): " 
+                             << vis_frame.cols << "x" << vis_frame.rows 
+                             << " @ 10 fps" << std::endl;
+                    video_writer_initialized = true;
+                } else {
+                    std::cerr << "Failed to initialize longitudinal video writer" << std::endl;
+                    save_video = false;
+                }
+            }
+            
+            // Write frame if enabled
+            if (save_video && video_writer_initialized) {
+                video_writer.write(vis_frame);
+            }
+            
+            // Press 'q' to quit
+            int key = cv::waitKey(1);
+            if (key == 'q' || key == 27) {
+                running.store(false);
+            }
+        }
+
+        auto t_display_end = steady_clock::now();
+        long display_us = duration_cast<microseconds>(
+            t_display_end - t_display_start).count();
+        metrics.total_display_us.fetch_add(display_us);
+    }
+
+    // Cleanup
+    if (save_video && video_writer_initialized && video_writer.isOpened()) {
+        video_writer.release();
+        std::cout << "\nLongitudinal video saved to: " << output_video_path << std::endl;
+    }
+
+    if (enable_viz) {
+        cv::destroyWindow("Longitudinal Tracking");
+    }
+}
+
+int main(int argc, char** argv)
+{
+    std::string config_path = (argc >= 2) ? argv[1] : "/usr/share/visionpilot/visionpilot.conf";
+    Config config = ConfigReader::loadFromFile(config_path);
+    std::cout << "Loaded configuration from: " << config_path << std::endl;
+    
+    // Extract configuration values
+    std::string mode = config.mode;
+    std::string source;
+    bool is_camera = (mode == "camera");
+    
+    if (is_camera) {
+        // Interactive camera selection
+        if (config.source.camera_auto_select) {
+            source = selectCamera();
+            if (source.empty()) {
+                std::cout << "No camera selected. Exiting." << std::endl;
+                return 0;
+            }
+        } else {
+            source = config.source.camera_device_id;
+        }
+        
+        // Verify camera works
+        if (!verifyCamera(source)) {
+            std::cerr << "\nCamera verification failed." << std::endl;
+            std::cerr << "Please check connection and driver installation." << std::endl;
+            printDriverInstructions();
+            return 1;
+        }
+    } else {
+        source = config.source.video_path;
+    }
+    
+    std::string model_path = config.models.egolanes_path;
+    std::string provider = config.models.provider;
+    std::string precision = config.models.precision;
+    int device_id = config.models.device_id;
+    std::string cache_dir = config.models.cache_dir;
+    float threshold = config.models.threshold;
+    
+    bool measure_latency = config.output.measure_latency;
+    bool enable_viz = config.output.enable_viz;
+    bool save_video = config.output.save_video;
+    std::string output_video_path = config.output.output_video_path;
+    std::string csv_log_path = config.output.csv_log_path;
+    
+    bool enable_rerun = config.rerun.enabled;
+    bool spawn_rerun_viewer = config.rerun.spawn_viewer;
+    std::string rerun_save_path = config.rerun.save_path;
+    
+    std::string autosteer_model_path = config.models.autosteer_path;
+    
+    std::string can_interface_name = "";
+    if (config.can_interface.enabled) {
+        can_interface_name = config.can_interface.interface_name;
+    }
+    
+    double K_p = config.steering_control.Kp;
+    double K_i = config.steering_control.Ki;
+    double K_d = config.steering_control.Kd;
+    double K_S = config.steering_control.Ks;
+
+    std::unique_ptr<CameraCalibration> camera_calibration;
+    if (config.camera_calibration.enabled) {
+        const std::string& inference_camera_cfg = config.camera_calibration.inference_camera_config_path;
+        const std::string& standard_pose_cfg = config.camera_calibration.standard_pose_config_path;
+
+        if (inference_camera_cfg.empty() || standard_pose_cfg.empty()) {
+            std::cerr << "[CameraCalibration] Enabled but config paths are missing. "
+                      << "Please set camera_calibration.inference_camera_config_path and "
+                      << "camera_calibration.standard_pose_config_path. Continuing without calibration." << std::endl;
+        } else {
+            try {
+                camera_calibration = createCameraCalibrationFromJson(
+                    inference_camera_cfg, 
+                    standard_pose_cfg
+                );
+                std::cout << "[CameraCalibration] Enabled" << std::endl;
+                std::cout << "  inference config: " << inference_camera_cfg << std::endl;
+                std::cout << "  standard pose config: " << standard_pose_cfg << "\n" << std::endl;
+            } catch (const std::exception& e) {
+                std::cerr << "[CameraCalibration] Initialization failed. Continuing without calibration: "
+                          << e.what() << std::endl;
+            }
+        }
+    }
+    
+    if (save_video && !enable_viz) {
+        std::cerr << "Warning: save_video requires enable_viz=true. Enabling visualization." << std::endl;
+        enable_viz = true;
+    }
+
+    // Initialize inference backend
+    std::cout << "Loading model: " << model_path << std::endl;
+#ifdef SKIP_ORT
+    std::cout << "Precision: " << precision << std::endl;
+    std::cout << "Device ID: " << device_id << " | Cache dir: " << cache_dir << std::endl;
+    std::cout << "\nNote: TensorRT engine build may take 20-30 seconds on first run..." << std::endl;
+#else
+#ifdef SKIP_ORT
+    std::cout << "Precision: " << precision << std::endl;
+    std::cout << "Device ID: " << device_id << " | Cache dir: " << cache_dir << std::endl;
+    std::cout << "\nNote: TensorRT engine build may take 20-30 seconds on first run..." << std::endl;
+#else
+    std::cout << "Provider: " << provider << " | Precision: " << precision << std::endl;
+    
+    if (provider == "tensorrt") {
+        std::cout << "Device ID: " << device_id << " | Cache dir: " << cache_dir << std::endl;
+        std::cout << "\nNote: TensorRT engine build may take 20-30 seconds on first run..." << std::endl;
+    }
+#endif
+#endif
+
+#ifdef SKIP_ORT
+    // TensorRT: precision is fp16 or fp32, no provider needed
+    EgoLanesEngine engine(model_path, precision, device_id, cache_dir);
+#else
+    // ONNX Runtime: provider and precision
+    EgoLanesEngine engine(model_path, provider, precision, device_id, cache_dir);
+#endif
+    std::cout << "Backend initialized!\n" << std::endl;
+
+    // Warm-up inference (builds TensorRT engine on first run)
+#ifdef SKIP_ORT
+    // TensorRT always needs warm-up
+    std::cout << "Running warm-up inference to build TensorRT engine..." << std::endl;
+    std::cout << "This may take 20-60 seconds on first run. Please wait...\n" << std::endl;
+    
+    cv::Mat dummy_frame(720, 1280, CV_8UC3, cv::Scalar(128, 128, 128));
+    auto warmup_start = std::chrono::steady_clock::now();
+    
+    // Run warm-up inference
+    LaneSegmentation warmup_result = engine.inference(dummy_frame, threshold);
+    
+    auto warmup_end = std::chrono::steady_clock::now();
+    double warmup_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+        warmup_end - warmup_start).count() / 1000.0;
+    
+    std::cout << "Warm-up complete! (took " << std::fixed << std::setprecision(1) 
+              << warmup_time << "s)" << std::endl;
+    std::cout << "TensorRT engine is now cached and ready.\n" << std::endl;
+#else
+    // ONNX Runtime: only warm-up if using TensorRT provider
+    if (provider == "tensorrt") {
+        std::cout << "Running warm-up inference to build TensorRT engine..." << std::endl;
+        std::cout << "This may take 20-60 seconds on first run. Please wait...\n" << std::endl;
+        
+        cv::Mat dummy_frame(720, 1280, CV_8UC3, cv::Scalar(128, 128, 128));
+        auto warmup_start = std::chrono::steady_clock::now();
+        
+        // Run warm-up inference
+        LaneSegmentation warmup_result = engine.inference(dummy_frame, threshold);
+        
+        auto warmup_end = std::chrono::steady_clock::now();
+        double warmup_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+            warmup_end - warmup_start).count() / 1000.0;
+        
+        std::cout << "Warm-up complete! (took " << std::fixed << std::setprecision(1) 
+                  << warmup_time << "s)" << std::endl;
+        std::cout << "TensorRT engine is now cached and ready.\n" << std::endl;
+    }
+#endif
+    
+    std::cout << "Backend ready!\n" << std::endl;
+ 
+#ifdef ENABLE_RERUN
+    // Initialize Rerun logger (optional)
+    std::unique_ptr<autoware_pov::vision::rerun_integration::RerunLogger> rerun_logger;
+    if (enable_rerun) {
+        rerun_logger = std::make_unique<autoware_pov::vision::rerun_integration::RerunLogger>(
+            "EgoLanes", spawn_rerun_viewer, rerun_save_path);
+    }
+#endif
+
+    // Initialize PathFinder (mandatory - uses LaneTracker's BEV output)
+    std::unique_ptr<PathFinder> path_finder = std::make_unique<PathFinder>(4.0);  // 4.0m default lane width
+    std::cout << "PathFinder initialized (Bayes filter + polynomial fitting)" << std::endl;
+    std::cout << "  - Using BEV points from LaneTracker" << std::endl;
+    std::cout << "  - Transform: BEV pixels → meters (TODO: calibrate)" << "\n" << std::endl;
+    
+    // Initialize Steering Controller (mandatory)
+    std::unique_ptr<SteeringController> steering_controller = std::make_unique<SteeringController>(K_p, K_i, K_d, K_S);
+    std::cout << "Steering Controller initialized" << std::endl;
+    
+    // Initialize AutoSteer (mandatory - temporal steering prediction)
+    std::unique_ptr<AutoSteerEngine> autosteer_engine;
+    std::cout << "\nLoading AutoSteer model: " << autosteer_model_path << std::endl;
+    
+#ifdef SKIP_ORT
+    // TensorRT Direct: precision is fp16 or fp32, no provider needed
+    std::cout << "Precision: " << precision << std::endl;
+    std::cout << "Device ID: " << device_id << " | Cache dir: " << cache_dir << std::endl;
+    std::cout << "\nNote: TensorRT engine build may take 20-30 seconds on first run..." << std::endl;
+    
+    autosteer_engine = std::make_unique<AutoSteerEngine>(
+        autosteer_model_path, precision, device_id, cache_dir);
+    
+    // Warm-up AutoSteer inference (builds TensorRT engine on first run)
+    std::cout << "Running AutoSteer warm-up inference to build TensorRT engine..." << std::endl;
+    std::cout << "This may take 20-60 seconds on first run. Please wait...\n" << std::endl;
+    
+    auto autosteer_warmup_start = std::chrono::steady_clock::now();
+    std::vector<float> dummy_input(6 * 80 * 160, 0.5f);
+    float autosteer_warmup_result = autosteer_engine->inference(dummy_input);
+    auto autosteer_warmup_end = std::chrono::steady_clock::now();
+    double autosteer_warmup_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+        autosteer_warmup_end - autosteer_warmup_start).count() / 1000.0;
+    
+    std::cout << "AutoSteer warm-up complete! (took " << std::fixed << std::setprecision(1) 
+              << autosteer_warmup_time << "s)" << std::endl;
+    std::cout << "TensorRT engine is now cached and ready.\n" << std::endl;
+#else
+    // ONNX Runtime: provider and precision
+    std::cout << "Provider: " << provider << " | Precision: " << precision << std::endl;
+    
+    if (provider == "tensorrt") {
+        std::cout << "Device ID: " << device_id << " | Cache dir: " << cache_dir << std::endl;
+        std::cout << "\nNote: TensorRT engine build may take 20-30 seconds on first run..." << std::endl;
+    }
+    
+    autosteer_engine = std::make_unique<AutoSteerEngine>(
+        autosteer_model_path, provider, precision, device_id, cache_dir);
+    
+    // Warm-up AutoSteer inference (builds TensorRT engine on first run)
+    if (provider == "tensorrt") {
+        std::cout << "Running AutoSteer warm-up inference to build TensorRT engine..." << std::endl;
+        std::cout << "This may take 20-60 seconds on first run. Please wait...\n" << std::endl;
+        
+        auto autosteer_warmup_start = std::chrono::steady_clock::now();
+        std::vector<float> dummy_input(6 * 80 * 160, 0.5f);
+        float autosteer_warmup_result = autosteer_engine->inference(dummy_input);
+        auto autosteer_warmup_end = std::chrono::steady_clock::now();
+        double autosteer_warmup_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+            autosteer_warmup_end - autosteer_warmup_start).count() / 1000.0;
+        
+        std::cout << "AutoSteer warm-up complete! (took " << std::fixed << std::setprecision(1) 
+                  << autosteer_warmup_time << "s)" << std::endl;
+        std::cout << "TensorRT engine is now cached and ready.\n" << std::endl;
+    }
+#endif
+    
+    std::cout << "AutoSteer initialized (temporal steering prediction)" << std::endl;
+    std::cout << "  - Input: [1, 6, 80, 160] (concatenated EgoLanes t-1, t)" << std::endl;
+    std::cout << "  - Output: Steering angle (degrees, -30 to +30)" << std::endl;
+    std::cout << "  - Note: First frame will be skipped (requires temporal buffer)\n" << std::endl;
+
+    // ========================================
+    // LONGITUDINAL PIPELINE INITIALIZATION
+    // ========================================
+    
+    // Load longitudinal config (using same provider/precision as lateral for now)
+    std::string autospeed_model_path = config.models.autospeed_path;
+    std::string homography_yaml_path = config.models.homography_yaml_path;
+    float autospeed_conf_thresh = config.longitudinal.autospeed_conf_thresh;
+    float autospeed_iou_thresh  = config.longitudinal.autospeed_iou_thresh;
+    
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "LONGITUDINAL PIPELINE INITIALIZATION" << std::endl;
+    std::cout << "========================================" << std::endl;
+    
+    // Initialize AutoSpeed detection engine
+    std::cout << "\nLoading AutoSpeed model: " << autospeed_model_path << std::endl;
+    std::cout << "Provider: " << provider << " | Precision: " << precision << std::endl;
+    
+    std::unique_ptr<AutoSpeedOnnxEngine> autospeed_engine = std::make_unique<AutoSpeedOnnxEngine>(
+        autospeed_model_path, 
+        provider, 
+        precision, 
+        device_id, 
+        cache_dir
+    );
+    
+    // Warm-up AutoSpeed inference
+    if (provider == "tensorrt") {
+        std::cout << "Running AutoSpeed warm-up inference to build TensorRT engine..." << std::endl;
+        std::cout << "This may take 20-60 seconds on first run. Please wait...\n" << std::endl;
+        
+        auto autospeed_warmup_start = std::chrono::steady_clock::now();
+        cv::Mat dummy_frame_as(1280, 1920, CV_8UC3, cv::Scalar(128, 128, 128));
+        std::vector<Detection> warmup_dets = autospeed_engine->inference(dummy_frame_as, autospeed_conf_thresh, autospeed_iou_thresh);
+        auto autospeed_warmup_end = std::chrono::steady_clock::now();
+        double autospeed_warmup_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+            autospeed_warmup_end - autospeed_warmup_start).count() / 1000.0;
+        
+        std::cout << "AutoSpeed warm-up complete! (took " << std::fixed << std::setprecision(1) 
+                  << autospeed_warmup_time << "s)" << std::endl;
+        std::cout << "TensorRT engine is now cached and ready.\n" << std::endl;
+    }
+    
+    std::cout << "AutoSpeed initialized (vehicle detection)" << std::endl;
+    std::cout << "  - Input: Full frame [1280x1920]" << std::endl;
+    std::cout << "  - Output: Bounding boxes (class 1=CIPO L1, class 2=CIPO L2)" << std::endl;
+    
+    // Initialize ObjectFinder (multi-object tracker)
+    std::cout << "\nLoading homography calibration: " << homography_yaml_path << std::endl;
+    std::unique_ptr<ObjectFinder> object_finder = std::make_unique<ObjectFinder>(
+        homography_yaml_path,
+        1920,  // image width
+        1280,  // image height
+        false  // debug mode off
+    );
+    
+    std::cout << "ObjectFinder initialized (multi-object tracking + CIPO selection)" << std::endl;
+    std::cout << "  - Tracks: Class 1 (CIPO Level 1) and Class 2 (CIPO Level 2)" << std::endl;
+    std::cout << "  - Kalman Filter: 2D (position, velocity)" << std::endl;
+    std::cout << "  - Data Association: IoU + Centroid + Size" << std::endl;
+    std::cout << "  - Feature Matching: ORB for cut-in detection" << std::endl;
+    std::cout << "  - CIPO Selection: Closest object (considers both L1 and L2)\n" << std::endl;
+    
+    std::cout << "========================================\n" << std::endl;
+
+    // Initialize CAN Interface (optional - ground truth)
+    std::unique_ptr<CanInterface> can_interface;
+    if (!can_interface_name.empty()) {
+        try {
+            can_interface = std::make_unique<CanInterface>(can_interface_name);
+            std::cout << "CAN Interface initialized: " << can_interface_name << std::endl;
+        } catch (...) {
+            std::cerr << "Warning: Failed to initialize CAN interface '" << can_interface_name 
+                      << "'. Continuing without CAN data." << std::endl;
+        }
+    }
+
+    // Thread-safe queues with bounded size (prevents memory overflow)
+    // Double buffer for synchronized frame sharing (capture -> both inference threads)
+    DoubleFrameBuffer shared_frame_buffer;
+    
+    // Display queues (inference -> display threads)
+    ThreadSafeQueue<InferenceResult> display_queue(5);    // Max 5 frames waiting for display
+    ThreadSafeQueue<LongitudinalResult> display_queue_long(5); // Longitudinal display queue
+
+    // Performance metrics
+    PerformanceMetrics metrics;
+    metrics.measure_latency = measure_latency;
+    std::atomic<bool> running{true};
+
+    // Launch threads
+    std::cout << "========================================" << std::endl;
+    std::cout << "Starting multi-threaded inference pipeline" << std::endl;
+    std::cout << "========================================" << std::endl;
+    std::cout << "Source: " << (is_camera ? "Camera" : "Video") << std::endl;
+    std::cout << "Mode: " << (enable_viz ? "Visualization" : "Headless") << std::endl;
+    std::cout << "Threshold: " << threshold << std::endl;
+#ifdef ENABLE_RERUN
+    if (enable_rerun && rerun_logger && rerun_logger->isEnabled()) {
+        std::cout << "Rerun logging: ENABLED" << std::endl;
+    }
+#endif
+    std::cout << "PathFinder: ENABLED (polynomial fitting + Bayes filter)" << std::endl;
+    std::cout << "Steering Control: ENABLED" << std::endl;
+    std::cout << "AutoSteer: ENABLED (temporal steering prediction)" << std::endl;
+    std::cout << "Longitudinal Tracking: ENABLED (AutoSpeed + ObjectFinder)" << std::endl;
+    std::cout << "Synchronization: Double Buffer @ 10 FPS" << std::endl;
+    std::cout << "Visualization: UNIFIED (lateral + longitudinal overlayed)" << std::endl;
+    if (can_interface) {
+        std::cout << "CAN Interface: ENABLED (Ground Truth)" << std::endl;
+    }
+    if (measure_latency) {
+        std::cout << "Latency measurement: ENABLED (metrics every 30 frames)" << std::endl;
+    }
+    if (save_video && enable_viz) {
+        std::cout << "Video saving: ENABLED -> " << output_video_path << std::endl;
+    }
+    if (enable_viz) {
+        std::cout << "Press 'q' in any video window to quit" << std::endl;
+    } else {
+        std::cout << "Running in headless mode" << std::endl;
+        std::cout << "Press Ctrl+C to quit" << std::endl;
+    }
+    std::cout << "\nNOTE: Lateral and Longitudinal pipelines running in PARALLEL (unsynchronized for now)" << std::endl;
+    std::cout << "========================================\n" << std::endl;
+
+    // Launch threads - single capture broadcasts to both pipelines via double buffer
+    std::thread t_capture(captureThread, source, is_camera, 
+                          std::ref(shared_frame_buffer),
+                          std::ref(metrics), std::ref(running),
+                          can_interface.get(), camera_calibration.get(), config.capture_fps);
+    
+    // Lateral pipeline (reads from shared buffer)
+    std::thread t_lateral_inference(lateralInferenceThread, std::ref(engine),
+                            std::ref(shared_frame_buffer), std::ref(display_queue),
+                            std::ref(metrics), std::ref(running), threshold,
+                            path_finder.get(),
+                            steering_controller.get(),
+                            autosteer_engine.get());
+
+    // Longitudinal pipeline (reads from shared buffer, parallel execution)
+    // NOTE: ego_speed_default_ms is only used when CAN speed is unavailable.
+    const double kStaticEgoSpeedMs = config.longitudinal.ego_speed_default_ms;
+    // Longitudinal PID controller gains (configurable)
+    const double kLongitudinalKp = config.longitudinal.pid_Kp;
+    const double kLongitudinalKi = config.longitudinal.pid_Ki;
+    const double kLongitudinalKd = config.longitudinal.pid_Kd;
+    
+    std::thread t_longitudinal_inference(longitudinalInferenceThread,
+                                         std::ref(*autospeed_engine),
+                                         std::ref(*object_finder),
+                                         std::ref(shared_frame_buffer),
+                                         std::ref(display_queue_long),
+                                         std::ref(metrics),
+                                         std::ref(running),
+                                         autospeed_conf_thresh,
+                                         autospeed_iou_thresh,
+                                         kStaticEgoSpeedMs,
+                                         kLongitudinalKp,
+                                         kLongitudinalKi,
+                                         kLongitudinalKd);
+
+    // Shared-memory publisher — VisionPilot outputs available to any reader process
+    std::unique_ptr<VisionPilotSharedState> shared_state;
+    try {
+        shared_state = std::make_unique<VisionPilotSharedState>("/visionpilot_state", true);
+    } catch (const std::exception& e) {
+        std::cerr << "[IPC] Warning: shared-memory publish disabled: " << e.what() << std::endl;
+    }
+
+    // Unified display thread (merges lateral + longitudinal visualization)
+#ifdef ENABLE_RERUN
+    std::thread t_display(unifiedDisplayThread, 
+                          std::ref(display_queue), std::ref(display_queue_long),
+                          std::ref(metrics), std::ref(running), 
+                          enable_viz, save_video, output_video_path, csv_log_path,
+                          can_interface.get(), shared_state.get(), rerun_logger.get());
+#else
+    std::thread t_display(unifiedDisplayThread, 
+                          std::ref(display_queue), std::ref(display_queue_long),
+                          std::ref(metrics), std::ref(running), 
+                          enable_viz, save_video, output_video_path, csv_log_path,
+                          can_interface.get(), shared_state.get());
+#endif
+
+    // Wait for all threads
+    t_capture.join();
+    t_lateral_inference.join();
+    t_longitudinal_inference.join();
+    t_display.join();
+
+    std::cout << "\nInference pipeline stopped." << std::endl;
+
+    return 0;
+}

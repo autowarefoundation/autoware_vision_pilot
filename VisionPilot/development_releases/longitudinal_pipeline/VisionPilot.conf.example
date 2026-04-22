@@ -1,0 +1,108 @@
+# EgoLanes Pipeline Configuration File
+# Production-ready .conf format with comments
+# Copy this file to VisionPilot.conf and edit as needed
+
+# ============================================
+# Mode Configuration
+# ============================================
+# Mode: "camera" or "video"
+mode=video
+
+# ============================================
+# Source Configuration
+# ============================================
+# Video file path (used when mode=video)
+source.video.path=/path/to/your/video.mp4
+
+# Camera settings (used when mode=camera)
+# Set auto_select=true to interactively select camera
+# Set auto_select=false and device_id to use specific camera
+source.camera.auto_select=true
+source.camera.device_id=
+
+# ============================================
+# Camera Calibration (optional)
+# ============================================
+# If enabled, frames are calibrated in capture thread before inference.
+# JSON schema follows VisionPilot/calibration/configs/*.json.
+camera_calibration.enabled=true
+camera_calibration.inference_camera_config_path=<INFERENCE_CAM_CONFIG_PATH>
+camera_calibration.standard_pose_config_path=<STANDARD_POSE_CONFIG_PATH>
+
+# ============================================
+# Model Configuration
+# ============================================
+# EgoLanes model settings
+models.egolanes.path=/path/to/Egolanes_fp32.onnx
+models.egolanes.provider=tensorrt
+models.egolanes.precision=fp16
+models.egolanes.device_id=0
+models.egolanes.cache_dir=./trt_cache
+models.egolanes.threshold=0.0
+
+# AutoSteer model (required)
+models.autosteer.path=/path/to/AutoSteer_FP32.onnx
+
+#AutoSpeed model (required)
+models.autospeed.path=/path/to/AutoSpeed.onnx
+models.homography_yaml.path = /path/to/homography_yaml.yaml
+
+# ============================================
+# Pipeline Timing
+# ============================================
+# Target processing rate for capture thread (Hz)
+pipeline.target_fps=10.0
+
+# ============================================
+# Steering Control Parameters
+# ============================================
+# PID controller gains
+# Kp: Proportional gain
+# Ki: Integral gain  
+# Kd: Derivative gain
+# Ks: Curvature feedforward gain
+steering_control.Kp=0.33
+steering_control.Ki=0.01
+steering_control.Kd=-0.40
+steering_control.Ks=-0.3
+
+# ============================================
+# Longitudinal Control (AutoSpeed + ObjectFinder + SpeedPlanner + PID)
+# ============================================
+# AutoSpeed detection thresholds
+longitudinal.autospeed.conf_thresh=0.5
+longitudinal.autospeed.iou_thresh=0.5
+
+# Fallback ego speed (m/s) when CAN is disabled or invalid
+longitudinal.ego_speed_default_ms=10.0
+
+# Longitudinal PID gains for ideal_speed tracking
+longitudinal.pid.Kp=0.5
+longitudinal.pid.Ki=0.1
+longitudinal.pid.Kd=0.05
+
+# ============================================
+# Output Configuration
+# ============================================
+# Visualization and logging
+output.enable_viz=false
+output.save_video=false
+output.output_video_path=output.avi
+output.measure_latency=true
+output.csv_log_path=./assets/curve_params_metrics.csv
+
+# ============================================
+# Rerun Logging (optional)
+# ============================================
+# Enable Rerun for visualization and logging
+rerun.enabled=false
+rerun.spawn_viewer=true
+rerun.save_path=egolanes.rrd
+
+# ============================================
+# CAN Interface (optional - ground truth)
+# ============================================
+# Enable CAN bus interface for ground truth data
+can_interface.enabled=true
+can_interface.interface_name=can0
+
