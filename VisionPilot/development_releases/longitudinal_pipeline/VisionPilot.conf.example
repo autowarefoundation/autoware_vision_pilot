@@ -32,16 +32,6 @@ camera_calibration.standard_pose_config_path=<STANDARD_POSE_CONFIG_PATH>
 # ============================================
 # Model Configuration
 # ============================================
-# EgoLanes model settings
-models.egolanes.path=/path/to/Egolanes_fp32.onnx
-models.egolanes.provider=tensorrt
-models.egolanes.precision=fp16
-models.egolanes.device_id=0
-models.egolanes.cache_dir=./trt_cache
-models.egolanes.threshold=0.0
-
-# AutoSteer model (required)
-models.autosteer.path=/path/to/AutoSteer_FP32.onnx
 
 #AutoSpeed model (required)
 models.autospeed.path=/path/to/AutoSpeed.onnx
