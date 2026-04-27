@@ -7,6 +7,7 @@
 #include <fstream>
 #include <algorithm>
 #include <cctype>
+#include <stdexcept>
 
 namespace autoware_pov::config {
 
@@ -22,16 +23,43 @@ Config ConfigReader::loadFromFile(const std::string& config_path) {
         config.source.camera_auto_select = parseBool(props["source.camera.auto_select"]);
         config.source.camera_device_id = props["source.camera.device_id"];
     }
-    
-    config.models.egolanes_path = props["models.egolanes.path"];
-    config.models.provider = props["models.egolanes.provider"];
-    config.models.precision = props["models.egolanes.precision"];
-    config.models.device_id = parseInt(props["models.egolanes.device_id"]);
-    config.models.cache_dir = props["models.egolanes.cache_dir"];
-    config.models.threshold = parseFloat(props["models.egolanes.threshold"]);
-    config.models.autosteer_path = props["models.autosteer.path"];
-    config.models.autospeed_path = props["models.autospeed.path"];
-    config.models.homography_yaml_path = props["models.homography_yaml.path"];
+
+    config.models.egolanes_path =
+        props.find("models.egolanes.path") != props.end()
+            ? props["models.egolanes.path"]
+            : "";
+    config.models.provider =
+        props.find("models.egolanes.provider") != props.end()
+            ? props["models.egolanes.provider"]
+            : "cpu";
+    config.models.precision =
+        props.find("models.egolanes.precision") != props.end()
+            ? props["models.egolanes.precision"]
+            : "fp32";
+    config.models.device_id =
+        props.find("models.egolanes.device_id") != props.end() && !props["models.egolanes.device_id"].empty()
+            ? parseInt(props["models.egolanes.device_id"])
+            : 0;
+    config.models.cache_dir =
+        props.find("models.egolanes.cache_dir") != props.end()
+            ? props["models.egolanes.cache_dir"]
+            : "./trt_cache";
+    config.models.threshold =
+        props.find("models.egolanes.threshold") != props.end() && !props["models.egolanes.threshold"].empty()
+            ? parseFloat(props["models.egolanes.threshold"])
+            : 0.0f;
+    config.models.autosteer_path =
+        props.find("models.autosteer.path") != props.end()
+            ? props["models.autosteer.path"]
+            : "";
+    config.models.autospeed_path =
+        props.find("models.autospeed.path") != props.end()
+            ? props["models.autospeed.path"]
+            : "";
+    config.models.homography_yaml_path =
+        props.find("models.homography_yaml.path") != props.end()
+            ? props["models.homography_yaml.path"]
+            : "";
     
     config.steering_control.Kp = parseDouble(props["steering_control.Kp"]);
     config.steering_control.Ki = parseDouble(props["steering_control.Ki"]);
@@ -103,6 +131,10 @@ Config ConfigReader::loadFromFile(const std::string& config_path) {
 
 std::map<std::string, std::string> ConfigReader::parseConfigFile(const std::string& config_path) {
     std::ifstream file(config_path);
+    if (!file.is_open()) {
+        throw std::runtime_error("Failed to open config file: " + config_path);
+    }
+
     std::map<std::string, std::string> props;
     std::string line;
     

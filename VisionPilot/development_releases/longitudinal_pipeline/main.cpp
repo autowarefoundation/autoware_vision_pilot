@@ -27,6 +27,7 @@
 #include <stdexcept>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -50,13 +51,30 @@ int main(int argc, char* argv[]) {
                   << "VisionPilot AutoSpeed 2.0 Longitudinal Control\n"
                   << "========================================\n" << std::endl;
 
-        // Load configuration
-        ConfigReader config;
-        std::cout << "[Main] Configuration loaded\n";
+        // Load configuration from file (argv[1] overrides default path)
+        std::string config_path;
+        if (argc > 1) {
+            config_path = argv[1];
+        } else {
+            if (std::filesystem::exists("visionpilot.conf")) {
+                config_path = "visionpilot.conf";
+            } else if (std::filesystem::exists("../visionpilot.conf")) {
+                config_path = "../visionpilot.conf";
+            } else {
+                throw std::runtime_error(
+                    "Could not find visionpilot.conf. Run from project root, or pass config path as argv[1].");
+            }
+        }
+
+        Config config = ConfigReader::loadFromFile(config_path);
+        std::cout << "[Main] Configuration loaded from: " << config_path << "\n";
         
         // Initialize AutoSpeed 2.0 inference engine (ONNX Runtime, CPU by default)
         std::cout << "[Main] Initializing AutoSpeed 2.0 inference engine...\n";
-        const std::string model_path = std::string(VISIONPILOT_SHARE_DIR) + "/weights/autospeed_2.onnx";
+        const std::string model_path = config.models.autospeed_path;
+        if (model_path.empty()) {
+            throw std::runtime_error("Missing config key: models.autospeed.path");
+        }
         
         AutoSpeedOnnxEngine autospeed_engine(
             model_path,
@@ -71,7 +89,10 @@ int main(int argc, char* argv[]) {
 
         // Default homography calibration (identity matrix for testing)
         // In production, load from actual calibration file
-        const std::string homography_yaml = "config/homography.yaml";
+        const std::string homography_yaml = config.models.homography_yaml_path;
+        if (homography_yaml.empty()) {
+            throw std::runtime_error("Missing config key: models.homography_yaml.path");
+        }
         
         // Initialize object tracker
         std::cout << "[Main] Initializing object tracking...\n";
