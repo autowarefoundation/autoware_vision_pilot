@@ -25,19 +25,22 @@ from typing import List, Dict, Any, Optional
 from torchvision import transforms
 import onnxruntime as ort
 import random
+from pathlib import Path
 
 # --- Setup ---
 script_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.abspath(os.path.join(script_dir, '..'))
-if project_root not in sys.path:
-    sys.path.append(project_root)
+repo_root = Path(__file__).resolve().parents[5]
+models_root = repo_root / "Models"
+for path in (repo_root, models_root):
+    if str(path) not in sys.path:
+        sys.path.append(str(path))
 
 
 try:
     from data_utils.load_data_scene_seg import LoadDataSceneSeg
     from data_utils.augmentations import Augmentations
 except ImportError:
-    sys.path.append(os.path.abspath(os.path.join(script_dir, '..', '..')))
+    sys.path.append(str(models_root))
     from data_utils.load_data_scene_seg import LoadDataSceneSeg
     from data_utils.augmentations import Augmentations
 
@@ -50,7 +53,7 @@ from torch.ao.quantization.quantizer.xnnpack_quantizer import (
 from torch.ao.quantization import move_exported_model_to_eval
 
 # --- Project Imports ---
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(str(models_root))
 from data_utils.load_data_scene_seg import LoadDataSceneSeg
 from data_utils.augmentations import Augmentations
 # IMPORTANT: Use the original FP32 network, not the one with Quantized stubs

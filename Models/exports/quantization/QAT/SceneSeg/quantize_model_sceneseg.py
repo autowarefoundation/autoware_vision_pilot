@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Optional
 import itertools
 import torch.nn.functional as F
+from pathlib import Path
 
 # --- PT2E and ONNX Imports ---
 import torch.quantization
@@ -26,8 +27,12 @@ from torch.ao.quantization.quantizer.xnnpack_quantizer import (
   get_symmetric_quantization_config,
 )
 
-# Make sure we can find required modules
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+# Make sure we can find required modules after moving under exports/quantization/QAT/SceneSeg.
+_REPO_ROOT = Path(__file__).resolve().parents[5]
+_MODELS_ROOT = _REPO_ROOT / "Models"
+for _path in (_REPO_ROOT, _MODELS_ROOT):
+    if str(_path) not in sys.path:
+        sys.path.append(str(_path))
 
 # Import required modules
 from data_utils.load_data_scene_seg import LoadDataSceneSeg

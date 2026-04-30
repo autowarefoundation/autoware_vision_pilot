@@ -4,10 +4,12 @@
 
 This folder provides comprehensive tools for ONNX model optimization and performance analysis using Quantization-Aware Training (QAT):
 
-1. `quantize_model_sceneseg.py`: Performs QAT training and converts FP32 models to optimized INT8 versions
-2. `benchmark_qat_model.py`: Converts QAT checkpoints to final ONNX models and benchmarks their performance
-3. `benchmark_onnx_models.py`: Benchmarks and compares PyTorch, ONNX FP32, and ONNX INT8 model performance
-4. Additional export utilities can be found in the **libtorch** and **onnx_rt** folders.
+1. `quantization/QAT/SceneSeg/quantize_model_sceneseg.py`: Performs QAT training and converts FP32 models to optimized INT8 versions
+2. `quantization/QAT/SceneSeg/benchmark_qat_model.py`: Converts QAT checkpoints to final ONNX models and benchmarks their performance
+3. `quantization/QAT/AutoDrive/autodrive_qat.py`: AutoDrive QAT ONNX export and benchmark helper
+4. `quantization/PTQ/AutoDrive/autodrive_ptq.py`: AutoDrive PT2E PTQ export and benchmark helper
+5. `benchmark_onnx_models.py`: Benchmarks and compares PyTorch, ONNX FP32, and ONNX INT8 model performance
+6. Additional export utilities can be found in the **libtorch** and **onnx_rt** folders.
 
 ## Watch the explainer video
 Please click the video link to play - [***Video link***](https://drive.google.com/file/d/1o7lEQHD0VcooGQ0-rRwHe5UGDCBkUCNB/view?usp=drive_link)
@@ -58,7 +60,7 @@ The QAT process fine-tunes a pre-trained FP32 model to learn weights that are re
 Fine-tune your FP32 model with quantization awareness:
 
 ```bash
-python quantize_model_sceneseg.py \
+python Models/exports/quantization/QAT/SceneSeg/quantize_model_sceneseg.py \
     --model_save_root_path /path/to/save/checkpoints/ \
     --root /path/to/dataset/root/ \
     --fp32_model /path/to/pretrained_fp32_model.pth \
@@ -81,7 +83,7 @@ python quantize_model_sceneseg.py \
 Convert QAT checkpoint to final ONNX model and benchmark performance:
 
 ```bash
-python benchmark_qat_model.py \
+python Models/exports/quantization/QAT/SceneSeg/benchmark_qat_model.py \
     --qat_checkpoint_path /path/to/qat_checkpoint_epoch_4_step_31057.pth \
     --dataset_root /path/to/dataset/root/ \
     --num_calibration_samples 200 \
