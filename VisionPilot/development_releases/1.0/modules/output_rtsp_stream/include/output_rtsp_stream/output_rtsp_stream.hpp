@@ -1,0 +1,8 @@
+//
+// Created by atanasko on 27.4.26.
+//
+
+#ifndef VISIONPILOT_OUTPUT_RTSP_STREAM_H
+#define VISIONPILOT_OUTPUT_RTSP_STREAM_H
+
+#endif //VISIONPILOT_OUTPUT_RTSP_STREAM_H
