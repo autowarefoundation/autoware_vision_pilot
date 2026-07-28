@@ -19,6 +19,7 @@ struct SourceConfig {
     std::string input_camera_topic   = "/camera/image";
     std::string v4l2_device  = "/dev/video0";
     int         v4l2_fps     = 10;
+    std::string can_device;   // e.g. "can0" — leave empty to disable CAN
 };
 
 // struct PipelineConfig {
