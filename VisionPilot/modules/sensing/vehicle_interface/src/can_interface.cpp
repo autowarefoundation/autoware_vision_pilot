@@ -33,6 +33,7 @@ static inline uint16_t read_u16(const uint8_t* d, int byte)
 // ============================================================================
 
 CanInterface::CanInterface(const std::string& can_device)
+    : can_device_(can_device)
 {
     sock_fd_ = socket(PF_CAN, SOCK_RAW, CAN_RAW);
     if (sock_fd_ < 0)
@@ -100,7 +101,7 @@ double CanInterface::read()
     while (std::chrono::steady_clock::now() < deadline)
     {
         struct can_frame frame{};
-        const ssize_t n = read(sock_fd_, &frame, sizeof(frame));
+        const ssize_t n = ::read(sock_fd_, &frame, sizeof(frame));
         if (n < 0)
         {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -135,6 +136,12 @@ double CanInterface::read()
 
 void CanInterface::write(double steering, double acceleration)
 {
+    // steering comes from the planner as a front-wheel angle (rad).
+    // Convert to EPS torque command via simple P-controller.
+    const double torque = std::clamp(
+        steering * STEER_ANGLE_TO_TORQUE,
+        -STEER_TORQUE_MAX, STEER_TORQUE_MAX);
+
     // ── STEERING_LKA (CAN ID 0x2E4, 5 bytes) ──────────────────────────────
     //
     //  Byte 0 : [7] SET_ME_1=1  [6:1] COUNTER  [0] STEER_REQUEST
@@ -146,18 +153,17 @@ void CanInterface::write(double steering, double acceleration)
         frame.can_id  = CAN_ID_STEERING_LKA;
         frame.can_dlc = 5;
 
-        const int16_t torque =
-            static_cast<int16_t>(std::clamp(steering, -STEER_TORQUE_MAX, STEER_TORQUE_MAX));
+        const int16_t torque_cmd = static_cast<int16_t>(torque);
 
         frame.data[0] = (1u << 7) |
                          ((steer_counter_ & 0x3F) << 1) |
-                         (torque != 0 ? 1u : 0u);
-        frame.data[1] = static_cast<uint8_t>(torque & 0xFF);
-        frame.data[2] = static_cast<uint8_t>((torque >> 8) & 0xFF);
+                         (torque_cmd != 0 ? 1u : 0u);
+        frame.data[1] = static_cast<uint8_t>(torque_cmd & 0xFF);
+        frame.data[2] = static_cast<uint8_t>((torque_cmd >> 8) & 0xFF);
         frame.data[3] = 0x00;   // LKA_STATE
         frame.data[4] = toyota_checksum(frame, 4);
 
-        if (write(sock_fd_, &frame, sizeof(frame)) < 0)
+        if (::write(sock_fd_, &frame, sizeof(frame)) < 0)
             VP_WARN("CanInterface: STEERING_LKA write failed");
 
         steer_counter_ = (steer_counter_ + 1) & 0x3F;
@@ -193,7 +199,7 @@ void CanInterface::write(double steering, double acceleration)
             static_cast<int8_t>(std::clamp(acceleration, ACCEL_MIN, ACCEL_MAX) / 0.05));
         frame.data[7] = toyota_checksum(frame, 7);
 
-        if (write(sock_fd_, &frame, sizeof(frame)) < 0)
+        if (::write(sock_fd_, &frame, sizeof(frame)) < 0)
             VP_WARN("CanInterface: ACC_CONTROL write failed");
 
         accel_counter_ = (accel_counter_ + 1) & 0x0F;

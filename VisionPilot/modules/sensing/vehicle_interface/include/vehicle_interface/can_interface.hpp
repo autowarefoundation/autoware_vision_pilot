@@ -25,6 +25,7 @@ public:
     void write(double steering, double acceleration) override;
 
 private:
+    std::string can_device_;
     int sock_fd_ = -1;
     struct sockaddr_can addr_{};
     int if_index_ = 0;
@@ -41,8 +42,9 @@ private:
     static constexpr double ACCEL_MAX =  2.0;
     static constexpr double ACCEL_MIN = -3.5;
 
-    uint8_t compute_checksum_lka(const struct can_frame& frame) const;
-    uint8_t compute_checksum_acc(const struct can_frame& frame) const;
+    // P-controller gain: angle(rad) → torque(Nm).  ~800 is a starting point
+    // for the Lexus ES200 EPS; tune on-bench with a torque sensor readback.
+    static constexpr double STEER_ANGLE_TO_TORQUE = 800.0;
 };
 
 #endif //VISIONPILOT_CAN_INTERFACE_HPP
