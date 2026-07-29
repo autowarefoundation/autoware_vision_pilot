@@ -22,8 +22,11 @@ cd ~/vision_pilot/deploy
 sudo bash setup.sh
 ```
 
-## ONNX Runtime — GPU 版本（pip install）
-## ONNX Runtime — GPU Version (pip install)
+## ONNX Runtime — GPU 版本（Jetson Orin/Xavier）
+## ONNX Runtime — GPU Version (Jetson Orin/Xavier)
+
+> **⚠️ 不要从源码编译 ORT GPU 版！** ORT v1.27+ 的 abseil 20250814 升级导致 nvcc 在 aarch64 上编译 `libonnxruntime_providers_cuda.so` 崩溃。预编译 wheel 完美避开此问题。
+> **Do NOT compile ORT GPU from source!** ORT v1.27+ abseil 20250814 upgrade causes nvcc to crash on aarch64 when compiling `libonnxruntime_providers_cuda.so`. Pre-built wheel avoids this entirely.
 
 脚本从 **NVIDIA Jetson AI Lab** PyPI 索引安装 `onnxruntime-gpu`，该索引提供预编译的 aarch64 wheel，支持 CUDA + TensorRT。**不需要从源码编译。**
 The script installs `onnxruntime-gpu` from **NVIDIA Jetson AI Lab** PyPI index, which provides pre-built aarch64 wheels with CUDA + TensorRT support. **No source compilation needed.**
@@ -33,6 +36,18 @@ The key command:
 ```bash
 export PIP_INDEX_URL=https://pypi.jetson-ai-lab.io/jp6/cu126
 pip3 install onnxruntime-gpu
+```
+
+## ONNX Runtime — CPU 版本（x86_64 测试）
+## ONNX Runtime — CPU Version (x86_64 Testing)
+
+在 x86_64 电脑上做 video 模式测试时，使用 CPU 版即可。没有 nvcc 编译问题。
+For video mode testing on x86_64 machines, use the CPU version. No nvcc compilation issues.
+
+```bash
+wget https://github.com/microsoft/onnxruntime/releases/download/v1.28.0/onnxruntime-linux-x64-1.28.0.tgz
+tar -xzf onnxruntime-linux-x64-1.28.0.tgz
+cmake -DONNXRUNTIME_ROOT=$(pwd)/onnxruntime-linux-x64-1.28.0 -DGPU=OFF ..
 ```
 
 ## 前置条件

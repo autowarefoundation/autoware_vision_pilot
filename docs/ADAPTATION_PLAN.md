@@ -73,7 +73,15 @@
 
 **不改代码**: `onnx_engine.cpp` 已完整支持 CUDA/TensorRT，无需修改。
 
-> **注意**: 不需要从源码编译！ORT 从 v1.27.0 起升级 abseil-cpp 到 20250814，新版 raw_hash_map.h 的模板写法导致 nvcc 在 aarch64 上解析失败。v1.28.0 已修复 (`Built with abseil 20250814 under NVCC`)。但预编译 wheel 绕过了这个问题，直接 pip 安装即可。
+> **⚠️ 重要：为什么不能从源码编译 ORT GPU 版**
+>
+> ORT 从 v1.27.0 开始内部升级了 abseil-cpp 到 20250814 版本。新版 `raw_hash_map.h` 使用了复杂的 C++ 模板写法，nvcc（CUDA 编译器）在 aarch64 架构上无法正确解析这些模板，导致编译 `libonnxruntime_providers_cuda.so` 时崩溃。
+>
+> ORT v1.28.0 release notes 明确写了已修复：`Built with abseil 20250814 under NVCC (#28586)`。
+>
+> **结论**：根本不需要从源码编译。NVIDIA Jetson AI Lab 提供了现成的预编译 wheel，直接 `pip install onnxruntime-gpu` 即可，完美避开这个坑。
+>
+> **CPU 用户**（x86_64 测试）：没有 nvcc 编译问题，直接从 GitHub releases 下载 `.tgz` 即可，详见 INSTALL.md B4-alt 节。
 
 ---
 

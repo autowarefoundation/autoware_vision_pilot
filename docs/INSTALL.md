@@ -114,7 +114,17 @@ sudo apt update && sudo apt install -y \
 
 ### B4. 安装 ONNX Runtime（GPU版，直接 pip install）
 
+**适用人群**：在 Jetson Orin/Xavier 上部署，需要 GPU 推理加速。
+
 **说明**：NVIDIA 官方为 JetPack 6.x 提供了预编译的 `onnxruntime-gpu` wheel，包含完整 CUDA + TensorRT 支持。**不需要从源码编译**，一行命令搞定。
+
+> **⚠️ 重要：为什么不能从源码编译 ORT GPU 版**
+>
+> 如果你尝试从源码编译 ONNX Runtime GPU 版（`libonnxruntime_providers_cuda.so`），会遇到 **abseil 20250814 + nvcc 模板错误**：
+>
+> - **原因**：ORT 从 v1.27.0 开始内部升级了 abseil-cpp 到 20250814 版本。新版 `raw_hash_map.h` 使用了复杂的 C++ 模板写法，nvcc（CUDA 编译器）在 aarch64 架构上无法正确解析这些模板，导致编译 `libonnxruntime_providers_cuda.so` 时崩溃。
+> - **修复**：ORT v1.28.0 release notes 明确写了已修复：`Built with abseil 20250814 under NVCC (#28586)`。
+> - **结论**：**根本不需要从源码编译**。NVIDIA Jetson AI Lab 提供了现成的预编译 wheel，直接 `pip install onnxruntime-gpu` 即可，完美避开这个坑。
 
 ```bash
 # 1. 配置 NVIDIA Jetson AI Lab PyPI 源
@@ -156,6 +166,29 @@ sudo cp "$ORT_SITE/capi/libonnxruntime"*.so* /usr/share/visionpilot/onnxruntime/
 > wget https://github.com/guyin24/onnxruntime-gpu-for-jetson/releases/download/v1.24.4/onnxruntime_gpu-1.24.4-cp310-cp310-linux_aarch64.whl
 > pip3 install onnxruntime_gpu-1.24.4-cp310-cp310-linux_aarch64.whl
 > ```
+
+---
+
+### B4-alt. 安装 ONNX Runtime（CPU版，用于 x86_64 测试）
+
+**适用人群**：在 x86_64 电脑（Windows/Ubuntu）上做 video 模式测试，不需要 GPU 推理。
+
+CPU 版没有 abseil + nvcc 的问题（因为没有 CUDA 编译），直接从 GitHub releases 下载即可：
+
+```bash
+# 1. 下载 CPU 版 ONNX Runtime（x86_64）
+wget https://github.com/microsoft/onnxruntime/releases/download/v1.28.0/onnxruntime-linux-x64-1.28.0.tgz
+
+# 2. 解压
+tar -xzf onnxruntime-linux-x64-1.28.0.tgz
+
+# 3. 设置路径（用于 CMake 编译）
+ORT_ROOT=$(pwd)/onnxruntime-linux-x64-1.28.0
+
+# 4. 编译时指定
+cmake -DONNXRUNTIME_ROOT="$ORT_ROOT" -DGPU=OFF ..
+make -j VisionPilot
+```
 
 ### B5. 安装 ONNX Runtime 开发依赖（编译必需）
 
