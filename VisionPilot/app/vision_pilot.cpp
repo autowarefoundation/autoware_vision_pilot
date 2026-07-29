@@ -69,7 +69,17 @@ int main(int argc, char** argv)
     {
         camera_interface = std::make_unique<camera_interface::V4L2CameraInterface>(
             cfg.source.v4l2_device, static_cast<uint32_t>(cfg.source.v4l2_fps));
-        vehicle_interface = std::make_shared<CanInterface>();
+        if (!cfg.source.can_device.empty())
+        {
+            try
+            {
+                vehicle_interface = std::make_shared<CanInterface>(cfg.source.can_device);
+            }
+            catch (const std::exception& e)
+            {
+                VP_WARN("CAN init failed: %s — CAN disabled", e.what());
+            }
+        }
     }
 #endif
 
@@ -133,7 +143,7 @@ int main(int argc, char** argv)
         {
             pipeline.latency().print();
 
-            const double ego_v = vehicle_interface->read();
+            const double ego_v = vehicle_interface ? vehicle_interface->read() : 0.0;
             const double cte = r->lateral.cte_m;
             const double epsi = r->lateral.yaw_rad;
             const double kappa = r->lateral.curvature;
@@ -161,9 +171,12 @@ int main(int argc, char** argv)
                 cipo_dist,
                 r->cipo.velocity_ms);
 
-            vehicle_interface->write(
-                plan.steering.empty() ? 0.0 : plan.steering[1],
-                plan.acceleration);
+            if (vehicle_interface)
+            {
+                vehicle_interface->write(
+                    plan.steering.empty() ? 0.0 : plan.steering[1],
+                    plan.acceleration);
+            }
 
             if (cfg.visualization_on)
             {

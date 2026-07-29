@@ -1,0 +1,111 @@
+VERSION ""
+
+
+NS_ :
+    NS_DESC_
+    CM_
+    BA_DEF_
+    BA_
+    VAL_
+    CAT_DEF_
+    CAT_
+    FILTER
+    BA_DEF_DEF_
+    EV_DATA_
+    ENVVAR_DATA_
+    SGTYPE_
+    SGTYPE_VAL_
+    BA_DEF_SGTYPE_
+    BA_SGTYPE_
+    SIG_TYPE_REF_
+    SIG_VALTYPE_
+    SIGTYPE_VALTYPE_
+    BO_TX_BU_
+    BA_DEF_REL_
+    BA_REL_
+    BA_DEF_DEF_REL_
+    BU_SG_REL_
+    BU_EV_REL_
+    BU_BO_REL_
+    SIG_MUL_VAL_
+
+BS_:
+
+BU_: EPS FCM CGW
+
+# =============================================================================
+# Lexus ES TSS2 (2019-2024) — Bus 0 (Powertrain CAN)
+# Source: commaai/opendbc  (MIT License)
+# =============================================================================
+
+# ── Vehicle Speed (read) ────────────────────────────────────────────────────
+BO_ 170 WHEEL_SPEEDS: 8 CGW
+ SG_ WHEEL_SPEED_FR : 7|16@0+ (0.01,-67.67) [0|250] "kph" CGW
+ SG_ WHEEL_SPEED_FL : 23|16@0+ (0.01,-67.67) [0|250] "kph" CGW
+ SG_ WHEEL_SPEED_RR : 39|16@0+ (0.01,-67.67) [0|250] "kph" CGW
+ SG_ WHEEL_SPEED_RL : 55|16@0+ (0.01,-67.67) [0|250] "kph" CGW
+
+# ── Steering Angle Sensor (read) ────────────────────────────────────────────
+BO_ 37 STEER_ANGLE_SENSOR: 8 CGW
+ SG_ STEER_ANGLE : 3|12@0- (1.5,0) [-500|500] "deg" CGW
+ SG_ STEER_RATE : 35|12@0- (1,0) [-2000|2000] "deg/s" CGW
+ SG_ STEER_FRACTION : 39|4@0- (0.1,0) [-0.7|0.7] "deg" CGW
+
+# ── Steering Torque Sensor (read — override detection) ──────────────────────
+BO_ 608 STEER_TORQUE_SENSOR: 8 EPS
+ SG_ STEER_ANGLE_INITIALIZING : 3|1@0+ (1,0) [0|1] "" EPS
+ SG_ STEER_OVERRIDE : 0|1@0+ (1,0) [0|1] "" EPS
+ SG_ STEER_TORQUE_DRIVER : 15|16@0- (1,0) [-32768|32767] "" EPS
+ SG_ STEER_TORQUE_EPS : 47|16@0- (1,0) [-32768|32767] "" EPS
+
+# ── Steering LKA Command (write — torque-based) ────────────────────────────
+BO_ 740 STEERING_LKA: 5 EPS
+ SG_ STEER_REQUEST : 0|1@0+ (1,0) [0|1] "" EPS
+ SG_ SET_ME_1 : 7|1@0+ (1,0) [0|1] "" EPS
+ SG_ COUNTER : 6|6@0+ (1,0) [0|63] "" EPS
+ SG_ STEER_TORQUE_CMD : 15|16@0- (1,0) [-1500|1500] "" EPS
+ SG_ LKA_STATE : 31|8@0+ (1,0) [0|255] "" EPS
+ SG_ CHECKSUM : 39|8@0+ (1,0) [0|255] "" EPS
+
+# ── ACC Control Command (write — acceleration/brake) ───────────────────────
+BO_ 835 ACC_CONTROL: 8 FCM
+ SG_ ACCEL_CMD : 7|16@0- (0.001,0) [-20|20] "m/s^2" FCM
+ SG_ ALLOW_LONG_PRESS : 17|2@0+ (1,0) [0|2] "" FCM
+ SG_ ACC_MALFUNCTION : 18|1@0+ (1,0) [0|1] "" FCM
+ SG_ RADAR_DIRTY : 19|1@0+ (1,0) [0|1] "" FCM
+ SG_ DISTANCE : 20|1@0+ (1,0) [0|1] "" FCM
+ SG_ MINI_CAR : 21|1@0+ (1,0) [0|1] "" FCM
+ SG_ ACC_TYPE : 23|2@0+ (1,0) [0|3] "" FCM
+ SG_ CANCEL_REQ : 24|1@0+ (1,0) [0|1] "" FCM
+ SG_ ACC_CUT_IN : 25|1@0+ (1,0) [0|1] "" FCM
+ SG_ LEAD_VEHICLE_STOPPED : 29|1@0+ (1,0) [0|1] "" FCM
+ SG_ PERMIT_BRAKING : 30|1@0+ (1,0) [0|1] "" FCM
+ SG_ RELEASE_STANDSTILL : 31|1@0+ (1,0) [0|1] "" FCM
+ SG_ ACCEL_CMD_ALT : 47|8@0- (0.05,0) [-10|10] "m/s^2" FCM
+ SG_ CHECKSUM : 63|8@0+ (1,0) [0|255] "" FCM
+
+# ── PCM Cruise Status (read) ───────────────────────────────────────────────
+BO_ 466 PCM_CRUISE: 8 CGW
+ SG_ CRUISE_ACTIVE : 5|1@0+ (1,0) [0|1] "" CGW
+ SG_ CRUISE_STATE : 7|4@0+ (1,0) [0|15] "" CGW
+ SG_ GAS_RELEASED : 4|1@0+ (1,0) [0|1] "" CGW
+ SG_ CANCEL_REQ : 3|1@0+ (1,0) [0|1] "" CGW
+ SG_ STANDSTILL : 41|1@0+ (1,0) [0|1] "" CGW
+
+# ── PCM Cruise 2 (read — set speed) ───────────────────────────────────────
+BO_ 467 PCM_CRUISE_2: 8 CGW
+ SG_ MAIN_ON : 3|1@0+ (1,0) [0|1] "" CGW
+ SG_ SET_SPEED : 7|8@0+ (0.01,0) [0|255] "kph" CGW
+ SG_ ACC_FAULTED : 15|1@0+ (1,0) [0|1] "" CGW
+
+# ── EPS Status (read) ─────────────────────────────────────────────────────
+BO_ 610 EPS_STATUS: 8 EPS
+ SG_ LKA_STATE : 7|8@0+ (1,0) [0|255] "" EPS
+ SG_ LTA_STATE : 15|8@0+ (1,0) [0|255] "" EPS
+ SG_ ALIGNMENT_COMPLETE : 41|1@0+ (1,0) [0|1] "" EPS
+ SG_ READY : 42|1@0+ (1,0) [0|1] "" EPS
+
+CM_ BO_ 170 "Four wheel individual speeds, average for ego velocity";
+CM_ BO_ 740 "LKA torque steering command — max torque ±1500";
+CM_ BO_ 835 "ACC acceleration/brake command — range -3.5 to +2.0 m/s²";
+CM_ BO_ 608 "Driver steering torque — use for override detection";

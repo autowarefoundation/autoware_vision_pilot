@@ -129,6 +129,7 @@ Config load_vision_pilot_config()
 
     cfg.source.v4l2_device   = optional(kv, "source.v4l2_device", "/dev/video0");
     cfg.source.v4l2_fps      = parse_int(optional(kv, "source.v4l2_fps", "10"), "source.v4l2_fps");
+    cfg.source.can_device    = optional(kv, "source.can_device", "");
     // cfg.pipeline.initial_inference_check = parse_bool(
     //     optional(kv, "pipeline.initial_inference_check", "true"),
     //     "pipeline.initial_inference_check");
