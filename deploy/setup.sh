@@ -11,7 +11,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ONNXRUNTIME_VERSION="1.26.0"
+ONNXRUNTIME_VERSION="1.28.0"
 INSTALL_PREFIX="/usr/share/visionpilot"
 BUILD_DIR="${SCRIPT_DIR}/../VisionPilot/build"
 
@@ -88,23 +88,35 @@ ORT_DIR="${INSTALL_PREFIX}/onnxruntime"
 if [[ -d "$ORT_DIR" ]] && [[ -f "$ORT_DIR/lib/libonnxruntime.so" ]]; then
     info "  ONNX Runtime already installed at $ORT_DIR — skipping"
 else
-    mkdir -p "$INSTALL_PREFIX" /opt/ort_extract
+    # Method: pip install GPU wheel from NVIDIA Jetson AI Lab
+    info "  Installing GPU ONNX Runtime from NVIDIA Jetson AI Lab..."
+    export PIP_INDEX_URL="https://pypi.jetson-ai-lab.io/jp6/cu126"
+    pip3 install onnxruntime-gpu
 
-    # Try local copy first, then download
-    ORT_TGZ="${SCRIPT_DIR}/onnxruntime-linux-aarch64-${ONNXRUNTIME_VERSION}.tgz"
-    if [[ -f "$ORT_TGZ" ]]; then
-        info "  Found local tgz: $ORT_TGZ"
-    else
-        ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-aarch64-${ONNXRUNTIME_VERSION}.tgz"
-        ORT_TGZ="/tmp/ort.tgz"
-        info "  Downloading from $ORT_URL ..."
-        wget -q -O "$ORT_TGZ" "$ORT_URL"
-    fi
+    info "  Checking GPU providers..."
+    python3 -c "
+import onnxruntime as ort
+providers = ort.get_available_providers()
+print('  Providers:', providers)
+assert 'CUDAExecutionProvider' in providers, 'CUDA provider not found!'
+assert 'TensorrtExecutionProvider' in providers, 'TensorRT provider not found!'
+print('  GPU ONNX Runtime OK!')
+"
 
-    info "  Extracting ONNX Runtime..."
-    tar -xzf "$ORT_TGZ" -C /opt/ort_extract
-    mv /opt/ort_extract/*/ "$ORT_DIR"
-    rm -rf "$ORT_TGZ" /opt/ort_extract
+    # Copy .so files from pip install
+    info "  Setting up library symlinks..."
+    ORT_PIP_DIR="$(python3 -c "import onnxruntime, os; print(os.path.dirname(onnxruntime.__file__) + '/capi')")"
+    mkdir -p "$ORT_DIR/lib" "$ORT_DIR/include"
+    cp "$ORT_PIP_DIR"/libonnxruntime*.so* "$ORT_DIR/lib/"
+
+    # Download CPU tgz for headers only
+    info "  Fetching ORT headers from CPU tgz..."
+    wget -q "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-aarch64-${ONNXRUNTIME_VERSION}.tgz" \
+        -O /tmp/ort_headers.tgz
+    tar -xzf /tmp/ort_headers.tgz -C /tmp/ort_headers
+    cp -r /tmp/ort_headers/*/include/* "$ORT_DIR/include/"
+    rm -rf /tmp/ort_headers.tgz /tmp/ort_headers
+
     info "  ONNX Runtime installed to $ORT_DIR"
 fi
 

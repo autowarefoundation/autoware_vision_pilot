@@ -42,9 +42,9 @@ private:
     static constexpr double ACCEL_MAX =  2.0;
     static constexpr double ACCEL_MIN = -3.5;
 
-    // P-controller gain: angle(rad) → torque(Nm).  ~800 is a starting point
-    // for the Lexus ES200 EPS; tune on-bench with a torque sensor readback.
-    static constexpr double STEER_ANGLE_TO_TORQUE = 800.0;
+    // P-controller gain: angle(rad) → torque(Nm).  400 is a conservative
+    // starting point; increase toward 800 after bench/road tuning.
+    static constexpr double STEER_ANGLE_TO_TORQUE = 400.0;
 };
 
 #endif //VISIONPILOT_CAN_INTERFACE_HPP

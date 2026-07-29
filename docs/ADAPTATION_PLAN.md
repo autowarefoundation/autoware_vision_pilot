@@ -47,10 +47,10 @@
 | 组件 | 规格 |
 |------|------|
 | 计算平台 | NVIDIA Jetson AGX Orin 32GB |
-| 操作系统 | JetPack 6.x (Ubuntu 22.04 aarch64) |
-| CUDA | 12.x (JetPack自带) |
-| TensorRT | 10.x (JetPack自带) |
-| cuDNN | 9.x (JetPack自带) |
+| 操作系统 | JetPack 6.2.2 (Ubuntu 22.04 aarch64) |
+| CUDA | 12.6 (JetPack 6.2.2自带) |
+| TensorRT | 8.6 (JetPack 6.2.2自带) |
+| cuDNN | 8.9 (JetPack 6.2.2自带) |
 | 相机 | GMSL (通过MAX9296/MAX96712解串器连接) |
 | CAN适配器 | Red Panda (USB连接，Linux内核驱动 `panda`) |
 | 车型 | Lexus ES200 2023 (TSS2 CAN协议) |
@@ -66,12 +66,14 @@
 **需要做的事**:
 
 | # | 任务 | 详情 | 风险 |
-|---|------|------|------|
-| 1 | 下载/编译 aarch64 ONNX Runtime | 官方无aarch64 GPU包。选项: (A) JetPack自带的ORT (如有); (B) 从源码编译 `--use_cuda --use_tensorrt`; (C) 用CPU版本先跑通 | 中 — 编译耗时约30min |
-| 2 | 验证 CUDA/TensorRT EP 可用 | Orin 上 `libonnxruntime.so` 需要能找到 `libcudart.so`, `libnvinfer.so`, `libcudnn.so` | 低 — JetPack已安装 |
-| 3 | 模型兼容性 | FP32 ONNX模型在Orin上直接可用。INT8需要校准表 | 低 |
+|--|------|------|------|
+| 1 | 安装 aarch64 GPU 版 ONNX Runtime | NVIDIA Jetson AI Lab 提供预编译 wheel，`pip install onnxruntime-gpu` 即可。详见 INSTALL.md B4 节 | 低 — 一行命令搞定 |
+| 2 | 验证 CUDA/TensorRT EP 可用 | `ort.get_available_providers()` 应包含 `CUDAExecutionProvider` + `TensorrtExecutionProvider` | 低 — 已验证 |
+| 3 | 获取 ORT 头文件用于编译 | 从官方 aarch64 CPU tgz 中提取头文件 | 低 |
 
 **不改代码**: `onnx_engine.cpp` 已完整支持 CUDA/TensorRT，无需修改。
+
+> **注意**: 不需要从源码编译！ORT 从 v1.27.0 起升级 abseil-cpp 到 20250814，新版 raw_hash_map.h 的模板写法导致 nvcc 在 aarch64 上解析失败。v1.28.0 已修复 (`Built with abseil 20250814 under NVCC`)。但预编译 wheel 绕过了这个问题，直接 pip 安装即可。
 
 ---
 
@@ -117,13 +119,14 @@
 - 0xAA轮速解码 (4轮平均，kph→m/s)
 - 0x2E4转向扭矩 + Toyota XOR校验和 + counter
 - 0x343纵向控制 + Toyota XOR校验和 + counter
-- 角度→扭矩P控制器 (`STEER_ANGLE_TO_TORQUE = 800.0`)
+- 角度→扭矩P控制器 (`STEER_ANGLE_TO_TORQUE = 400.0`，保守起步，实车标定后可增至800)
 - 优雅降级: CAN初始化失败时禁用CAN，程序继续运行
 
 **需要验证/调参**:
-- `STEER_ANGLE_TO_TORQUE = 800.0` — P控制器增益需要在实车上标定
+- `STEER_ANGLE_TO_TORQUE = 400.0` — 保守起步，实车标定后可增至800（每步+100）
 - `ACCEL_MAX = 2.0`, `ACCEL_MIN = -3.5` — 加速度限制
 - `STEER_TORQUE_MAX = 1500.0` — 转向扭矩上限
+- **CAN发送频率 ≤ 100Hz** — Red Panda和车辆ECU的CAN总线负载限制，发送过快会导致丢帧或总线错误
 
 ---
 
@@ -230,10 +233,13 @@ python3 python3-pip
 pip3 install opencv-python numpy
 ```
 
-**ONNX Runtime**: 需要aarch64版本。来源:
-1. JetPack 6.x 可能自带 (检查 `dpkg -l | grep onnxruntime`)
-2. 从源码编译 (`git clone --recursive https://github.com/microsoft/onnxruntime && ./build.sh --use_cuda --use_tensorrt`)
-3. NVIDIA NGC容器内已包含
+**ONNX Runtime**: 预编译 GPU wheel 来自 NVIDIA Jetson AI Lab：
+```bash
+export PIP_INDEX_URL=https://pypi.jetson-ai-lab.io/jp6/cu126
+pip3 install onnxruntime-gpu
+```
+安装后验证 `ort.get_available_providers()` 包含 `CUDAExecutionProvider` 和 `TensorrtExecutionProvider`。
+
 
 ---
 
@@ -247,7 +253,10 @@ cat /etc/nv_tegra_release    # 应显示 JetPack 6.x
 nvidia-smi                    # 确认GPU可用
 nvcc --version                # 确认CUDA
 
-# 2. 安装编译依赖
+# 2. 锁定最大性能（编译和运行时都建议）
+sudo jetson_clocks
+
+# 3. 安装编译依赖
 sudo apt update && sudo apt install -y \
     build-essential cmake git \
     libopencv-dev \
@@ -255,25 +264,41 @@ sudo apt update && sudo apt install -y \
     coinor-libipopt-dev libcppad-dev liblapack-dev libblas-dev \
     nlohmann-json3-dev python3 python3-pip
 
-# 3. 检查ONNX Runtime
-dpkg -l | grep onnxruntime
-# 如果没有，需要编译或下载aarch64版本
+# 3. 安装 ONNX Runtime GPU 版（一行命令）
+export PIP_INDEX_URL=https://pypi.jetson-ai-lab.io/jp6/cu126
+pip3 install onnxruntime-gpu
 ```
 
 ### Phase 1: ONNX Runtime 安装
 
 ```bash
-# 方案A: 从源码编译 (推荐，确保GPU支持)
-git clone --recursive https://github.com/microsoft/onnxruntime
-cd onnxruntime
-./build.sh --config Release \
-    --use_cuda --cuda_home /usr/local/cuda \
-    --cudnn_home /usr/lib/aarch64-linux-gnu \
-    --tensorrt_home /usr/lib/aarch64-linux-gnu \
-    --build_shared_lib --skip_tests -j$(nproc)
+# 从 NVIDIA Jetson AI Lab 安装预编译 GPU wheel（包含 CUDA + TensorRT）
+export PIP_INDEX_URL=https://pypi.jetson-ai-lab.io/jp6/cu126
+pip3 install onnxruntime-gpu
 
-# 编译产物在 build/Linux/Release/
-sudo cp build/Linux/Release/libonnxruntime.so* /usr/local/lib/
+# 验证
+python3 -c "
+import onnxruntime as ort
+providers = ort.get_available_providers()
+assert 'CUDAExecutionProvider' in providers
+assert 'TensorrtExecutionProvider' in providers
+print('GPU ONNX Runtime OK!')
+"
+
+# 获取头文件（编译 VisionPilot 需要）
+# ORT 的 .so 文件会被 pip 安装到 site-packages，头文件需要从官方 CPU tgz 获取
+cd /tmp
+wget -q https://github.com/microsoft/onnxruntime/releases/download/v1.28.0/onnxruntime-linux-aarch64-1.28.0.tgz
+tar -xzf onnxruntime-linux-aarch64-1.28.0.tgz
+sudo mkdir -p /usr/share/visionpilot/onnxruntime/lib /usr/share/visionpilot/onnxruntime/include
+
+# 库文件来自 pip 安装
+ORT_LIB=$(python3 -c "import onnxruntime,os; print(os.path.dirname(onnxruntime.__file__)+'/capi')")
+sudo cp $ORT_LIB/libonnxruntime*.so* /usr/share/visionpilot/onnxruntime/lib/
+
+# 头文件来自 CPU tgz
+sudo cp -r onnxruntime-linux-aarch64-1.28.0/include/* /usr/share/visionpilot/onnxruntime/include/
+echo '/usr/share/visionpilot/onnxruntime/lib' | sudo tee /etc/ld.so.conf.d/visionpilot.conf
 sudo ldconfig
 ```
 
@@ -324,7 +349,7 @@ cp /path/to/your/H.yaml config/H.yaml
 python3 scripts/find_homography_C_matrix.py --output build/config/homography_C_matrix.yaml
 ```
 
-### Phase 5: 测试运行
+### Phase 5: 测试运行（详见第7节分步验证计划）
 
 ```bash
 # 1. 先测试相机
@@ -341,6 +366,8 @@ cd build
 # 4. 带调试可视化
 ./VisionPilot --debug-viz
 ```
+
+**重要**：严格按第7节的Step1→Step5顺序执行，不要跳步。
 
 ---
 
@@ -374,7 +401,7 @@ cd build
 | `deploy/setup.sh` | 安装脚本，apt+ORT+驱动 | 建议 |
 
 **可选调参**:
-- `can_interface.hpp`: `STEER_ANGLE_TO_TORQUE` 增益标定
+- `can_interface.hpp`: `STEER_ANGLE_TO_TORQUE` 增益标定（400起步，每步+100）
 - `vision_pilot.conf`: `speed_limit`, `Lf` 车辆参数
 
 ---
@@ -385,20 +412,255 @@ cd build
 |------|------|----------|
 | GMSL相机不暴露为标准V4L2设备 | 相机无法使用 | 检查JetPack设备树，必要时写NvArgus包装器 |
 | OpenCV V4L2后端在Orin上不可用 | 相机无法使用 | 从源码编译OpenCV，确保V4L2后端编译进去 |
-| ONNX Runtime aarch64 GPU支持缺失 | 推理极慢 | 从源码编译ORT with CUDA/TensorRT |
+| ONNX Runtime aarch64 GPU支持缺失 | 推理极慢 | 从 NVIDIA Jetson AI Lab pip 安装 GPU wheel
 | H.yaml标定不准确 | 路径预测偏差大 | 精心标定，多场景验证 |
 | CAN波特率不匹配 | 通信失败 | 确认Lexus TSS2使用500kbps |
-| 转向P控制器增益不合适 | 控制振荡/不足 | 从小增益开始，逐步增大，观察扭矩反馈 |
+| 转向P控制器增益不合适 | 控制振荡/不足 | 从400起步，每步+100，观察扭矩反馈，不超过1500 |
 
 ---
 
-## 7. 交付物清单
+## 7. 分步验证计划（关键！）
+
+**核心原则**：每个子系统独立验证通过后，再进入下一阶段。严禁跳步。
+
+### Step 1: ONNX Runtime 验证（不涉及相机/CAN）
+
+```bash
+# 在Orin上，用任意一张图片测试推理引擎能否加载模型
+# 1. 先用CPU模式跑通（最快）
+./build/VisionPilot --mode video --video test.mp4 --engine cpu
+# 2. 确认三个模型都加载成功，控制台无报错
+# 3. 切换GPU模式
+./build/VisionPilot --mode video --video test.mp4 --engine cuda
+```
+
+**通过标准**：模型加载成功，控制台输出推理耗时（<100ms/帧为正常）
+
+### Step 2: 相机独立验证（不涉及CAN/推理）
+
+```bash
+# 1. 确认设备节点
+ls /dev/video*
+v4l2-ctl --list-devices
+
+# 2. 确认支持的像素格式和分辨率
+v4l2-ctl -d /dev/video0 --list-formats-ext
+
+# 3. 用OpenCV直接采集一帧（Python脚本快速测试）
+python3 -c "
+import cv2
+cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+ret, frame = cap.read()
+if ret:
+    cv2.imwrite('test_frame.jpg', frame)
+    print(f'OK: {frame.shape}')
+else:
+    print('FAIL')
+cap.release()
+"
+
+# 4. 确认图像质量和方向
+# 检查 test_frame.jpg 是否正确，无花屏/颜色异常
+```
+
+**通过标准**：成功采集图像，分辨率/帧率正确，图像无花屏
+
+### Step 3: CAN独立验证（不涉及相机/推理）
+
+```bash
+# 1. 加载Red Panda驱动
+sudo modprobe panda
+ls /sys/class/net/can0    # 确认can0存在
+
+# 2. 配置CAN波特率
+sudo ip link set can0 type can bitrate 500000
+sudo ip link set can0 up
+
+# 3. 用candump监听（车辆通电状态下）
+timeout 5 candump can0 | head -20
+# 应该能看到CAN帧，特别是0xAA轮速帧
+
+# 4. 用cansend测试发送（谨慎！）
+# 仅在方向盘未被锁死、周围安全时测试
+# cansend can0 2E4#0000000000000000    # 发送零扭矩
+```
+
+**通过标准**：能收发CAN帧，无错误
+
+### Step 4: 端到端联调（相机+推理+CAN，安全环境）
+
+```bash
+# 1. 先在video模式下跑完整pipeline（不发CAN）
+./build/VisionPilot --mode video --video test.mp4
+
+# 2. 检查可视化输出
+# - BEV图像是否正确
+# - 路径点是否合理
+# - 加速度/转向角命令是否在预期范围
+
+# 3. 切换到v4l2模式，接真实相机
+./build/VisionPilot --mode v4l2
+
+# 4. 监控CAN输出（只读模式）
+candump can0 | grep -E "2E4|343"    # 观察发送的帧
+```
+
+**通过标准**：推理结果合理，可视化正常，CAN帧格式正确
+
+### Step 5: 实车标定（安全封闭场地）
+
+```bash
+# 1. 先标定H矩阵（5m、10m、20m、30m各放一个标定点）
+# 2. 从低速开始（<10km/h），有人在副驾随时接管
+# 3. 调整STEER_ANGLE_TO_TORQUE增益（从400开始，每次+100）
+# 4. 观察车辆响应：
+#   - 增益太小：转向不足
+#   - 增益太大：转向振荡
+# 5. 记录最佳增益值
+```
+
+**通过标准**：低速下车辆能稳定跟踪规划路径
+
+---
+
+## 8. 前人踩坑经验（来自Autoware社区）
+
+以下问题来自实际在Jetson上部署Autoware的用户分享的经验。虽然VisionPilot不直接使用Autoware，但底层依赖相似，值得借鉴。
+
+### 8.1 OpenCV 版本冲突（最常见）
+
+**现象**：编译报错，函数找不到或参数不匹配。
+
+**原因**：JetPack可能自带OpenCV 4.0，但某些模块需要3.2.0的特定API。
+
+**解决**：
+```bash
+# 检查当前OpenCV版本
+pkg-config --modversion opencv4
+# 如果是4.0且有冲突，降级：
+sudo apt-get purge libopencv-dev
+# 从NVIDIA源安装兼容版本
+```
+
+**对VisionPilot的影响**：VisionPilot使用现代OpenCV API，**兼容4.x**，通常不需要降级。但如果遇到编译错误，优先检查OpenCV版本。
+
+### 8.2 CUDA 版本必须匹配
+
+**现象**：运行时报错 `CUDA driver version is insufficient for CUDA runtime version`。
+
+**原因**：编译时的CUDA版本和运行时的CUDA版本不一致。
+
+**解决**：
+```bash
+# 检查CUDA版本
+nvcc --version
+nvidia-smi    # 显示驱动支持的最高CUDA版本
+
+# Autoware需要在cmake中指定CUDA版本
+# 修改 autowarebuildflagextras.cmake 中的版本号
+```
+
+**对VisionPilot的影响**：JetPack 6.x自带CUDA 12.x，VisionPilot的ORT直接使用，**通常不需要手动指定版本**。
+
+### 8.3 Eigen 版本问题（影响MPC编译）
+
+**现象**：Ipopt/MPC模块编译报错，Eigen相关。
+
+**原因**：系统可能有旧版Eigen，cmake找到旧版。
+
+**解决**：
+```bash
+# 检查Eigen版本
+dpkg -l | grep eigen
+# 如果版本 < 3.3.7，需要升级
+# 删除旧的cmake配置文件
+sudo rm -rf /usr/lib/cmake/eigen3
+# 安装新版本
+sudo apt install libeigen3-dev
+```
+
+**对VisionPilot的影响**：VisionPilot的MPC模块依赖CppAD/Ipopt，间接依赖Eigen。**需要确认系统Eigen版本≥3.3.7**。
+
+### 8.4 GStreamer 依赖（影响WebRTC和视频处理）
+
+**现象**：WebRTC模块编译失败，或视频解码报错。
+
+**原因**：缺少GStreamer开发包。
+
+**解决**：
+```bash
+sudo apt install -y \
+    libgstreamer1.0-dev \
+    libgstreamer-plugins-base1.0-dev \
+    libgstreamer-plugins-bad1.0-dev \
+    gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad
+```
+
+**对VisionPilot的影响**：V4L2后端可能依赖GStreamer解码。**必须安装这些包**。
+
+### 8.5 ARM 架构包名差异
+
+**现象**：`apt install` 报错找不到包。
+
+**原因**：某些包在aarch64上的名字与x86_64不同。
+
+**解决**：使用 `apt search` 查找正确包名：
+```bash
+apt search opencv | grep arm
+apt search eigen | grep arm
+```
+
+**对VisionPilot的影响**：需要逐个确认所有依赖包在aarch64上可用。
+
+### 8.6 OpenCV 从源码编译（如果V4L2不工作）
+
+**现象**：`cv::VideoCapture(0, cv::CAP_V4L2)` 打开失败或采集异常。
+
+**原因**：预编译的OpenCV可能没有编译V4L2后端。
+
+**解决**：从源码编译OpenCV，确保V4L2后端：
+```bash
+git clone https://github.com/opencv/opencv.git
+cd opencv && git checkout 4.5.0
+mkdir build && cd build
+cmake -D CMAKE_BUILD_TYPE=Release \
+      -D WITH_GSTREAMER=ON \
+      -D WITH_LIBV4L=ON \
+      -D CUDA_ARCH_BIN="8.7" \    # Orin的SM架构
+      -D CMAKE_INSTALL_PREFIX=/usr/local \
+      ..
+make -j$(nproc)
+sudo make install
+```
+
+**耗时**：约30-60分钟（取决于散热和编译核心数）。
+
+**对VisionPilot的影响**：如果标准V4L2采集有问题，这是**必要的备选方案**。
+
+### 8.7 编译散热注意事项
+
+**现象**：编译过程中CPU降频，编译极慢或死机。
+
+**原因**：Orin长时间满载会过热降频。
+
+**解决**：
+- 确保散热片/风扇安装到位
+- 编译前运行 `sudo jetson_clocks` 锁定最大频率
+- 分步编译，不要一次 `-j$(nproc)` 全开
+- 监控温度：`tegrastats`
+
+---
+
+## 9. 交付物清单
 
 ### 已完成 (代码层面)
 - [x] SocketCAN接口 (`can_interface.hpp/.cpp`)
 - [x] 配置解析支持 `can_device` (`vision_pilot_config.hpp/.cpp`)
 - [x] 主程序CAN集成 + 优雅降级 (`vision_pilot.cpp`)
-- [x] 角度→扭矩P控制器 (`can_interface.cpp`)
+- [x] 角度→扭矩P控制器 (400起步) (`can_interface.cpp`)
 - [x] Toyota TSS2校验和/counter (`can_interface.cpp`)
 
 ### 待完成 (运行环境)
@@ -406,4 +668,11 @@ cd build
 - [ ] Red Panda Linux驱动编译安装
 - [ ] 相机标定 → H.yaml
 - [ ] vision_pilot.conf 配置
-- [ ] 端到端测试
+- [ ] 分步验证通过（Step 1-5）
+
+### 验证状态（实车调试时填写）
+- [ ] Step 1: ORT推理验证 (video模式 + CPU → CUDA)
+- [ ] Step 2: 相机采集验证 (V4L2 + OpenCV Python测试)
+- [ ] Step 3: CAN收发验证 (candump + cansend)
+- [ ] Step 4: 端到端联调 (v4l2模式 + 可视化)
+- [ ] Step 5: 实车标定 (H矩阵 + P增益)
