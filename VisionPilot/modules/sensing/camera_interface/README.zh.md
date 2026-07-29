@@ -1,33 +1,33 @@
-# V4L2 Interface Module
+# V4L2 接口模块
 
-[🇨🇳 中文版](README.zh.md)
+[🇺🇸 English](README.md)
 
-## I. Overview
+## I. 概述
 
-This **V4L2 Interface** module provides a robust C++ wrapper for capturing video frames from V4L2 (Video4Linux2) camera devices and converting them to OpenCV `cv::Mat` format.
+本 **V4L2 接口** 模块提供了一个健壮的 C++ 包装器，用于从 V4L2（Video4Linux2）相机设备捕获视频帧并将其转换为 OpenCV `cv::Mat` 格式。
 
-This module is essential for low-level camera frame acquisition in VisionPilot 1.0, featuring:
+本模块对于 VisionPilot 1.0 中的底层相机帧采集至关重要，具有以下特性：
 
-- V4L2 camera capturing whose interface directly connects to V4L2 mounted devices (`/dev/video0`, `/dev/video1`, etc.)
-- Seamless conversion to OpenCV `cv::Mat` for downstream processing
-- Mutex-protected thread-safe frame and statistics
-- Able to specify desired FPS and codec settings
-- Monitor frames captured, dropped, and errors, etc.
+- V4L2 相机捕获，接口直接连接到 V4L2 挂载设备（`/dev/video0`、`/dev/video1` 等）
+- 无缝转换为 OpenCV `cv::Mat` 供下游处理
+- 互斥锁保护的线程安全帧和统计信息
+- 能够指定期望的 FPS 和编解码器设置
+- 监控捕获、丢弃和错误等帧统计信息
 
-## II. Architecture & module structure
+## II. 架构与模块结构
 
-### 1. Architecture
+### 1. 架构
 
-The `V4L2Reader` class is the main interface for V4L2 camera operations. It follows a similar pattern to the ROS2 camera subscriber but operates at a lower hardware level.
+`V4L2Reader` 类是 V4L2 相机操作的主要接口。它遵循与 ROS2 相机订阅者类似的模式，但在更低的硬件级别运行。
 
-Basically, for the V4L2 capture, we use a simple, off-the-shelf yet effective [OpenCV's VideoCapture](https://docs.opencv.org/4.x/d8/dfe/classcv_1_1VideoCapture.html) :
+基本上，对于 V4L2 捕获，我们使用简单、现成且有效的 [OpenCV 的 VideoCapture](https://docs.opencv.org/4.x/d8/dfe/classcv_1_1VideoCapture.html)：
 
 ```cpp
 cv::Mat frame;
 camera_capture >> frame;
 ```
 
-This uses OpenCV's VideoCapture with the CAP_V4L2 backend for direct V4L2 device access.
+这使用 OpenCV 的 VideoCapture 与 CAP_V4L2 后端进行直接 V4L2 设备访问。
 
 ```
 ┌─────────────────────────────────────────┐
@@ -43,21 +43,21 @@ This uses OpenCV's VideoCapture with the CAP_V4L2 backend for direct V4L2 device
                    │
                    ▼
 ┌─────────────────────────────────────────┐
-│   V4L2 Interface Module                 │
+│   V4L2 接口模块                         │
 │  ┌─────────────────────────────────────┐│
-│  │  V4L2Reader Class                   ││
+│  │  V4L2Reader 类                      ││
 │  │  - get_latest_frame()               ││
-│  │  - Statistics & monitoring          ││
+│  │  - 统计与监控                       ││
 │  └─────────────────────────────────────┘│
 └──────────────────┬──────────────────────┘
                    │
                    ▼
 ┌─────────────────────────────────────────┐
-│   VisionPilot Application Layer         │
+│   VisionPilot 应用层                    │
 └─────────────────────────────────────────┘
 ```
 
-### 2. Module structure
+### 2. 模块结构
 
 ```
 v4l2_interface/
@@ -70,35 +70,35 @@ v4l2_interface/
     └── v4l2_reader.cpp
 ```
 
-## III. Build
+## III. 构建
 
-### 1. Prerequisites
+### 1. 前置条件
 
-- ROS2 (tested on ROS2 Humble / Ubuntu 22.04).
+- ROS2（在 ROS2 Humble / Ubuntu 22.04 上测试）。
     - `source /opt/ros/humble/setup.bash`
-- Required packages:
+- 所需包：
     - `OpenCV`
 
-### 2. Steps
+### 2. 步骤
 
 ```bash
-# 1. From root to release directory
+# 1. 从根目录到发布目录
 cd VisionPilot/development_releases/1.0
 
-# 2. Create build dir
+# 2. 创建构建目录
 mkdir -p build && cd build
 
-# 3. Source ROS2 just in case you forgot to
+# 3. 加载 ROS2（以防你忘了）
 source /opt/ros/humble/setup.bash
 
-# 4. CMake configure
+# 4. CMake 配置
 cmake ..
 
-# 5. Compile
+# 5. 编译
 make -j$(nproc)
 ```
 
-### 3. Expected output
+### 3. 预期输出
 
 ```bash
 [ 97%] Building CXX object app/CMakeFiles/VisionPilot.dir/vision_pilot.cpp.o
@@ -106,39 +106,39 @@ make -j$(nproc)
 [100%] Built target VisionPilot
 ```
 
-## IV. Test
+## IV. 测试
 
-This module features V4L2 => OpenCV stream conversion, thus a V4L2 image stream is required.
+本模块具有 V4L2 => OpenCV 流转换功能，因此需要 V4L2 图像流。
 
-You can do a simple test using a local video by simply just:
+你可以使用本地视频进行简单测试：
 
-1. Publishing it as a V4L2 stream via [ffmpeg](https://ffmpeg.org/).
+1. 通过 [ffmpeg](https://ffmpeg.org/) 将其发布为 V4L2 流。
 
 ```bash
-# 1. Install package
+# 1. 安装包
 sudo apt update
 sudo apt install ffmpeg -y
 sudo apt install v4l2loopback-dkms -y
 
-# 2. Load the module (assuming you gonna stream it at `/dev/video9`)
+# 2. 加载模块（假设你将在 `/dev/video9` 流式传输）
 sudo modprobe -r v4l2loopback
 sudo modprobe v4l2loopback video_nr=9 card_label="Virtual Camera" exclusive_caps=1
 
-# 3. Publish looping video at that mount
+# 3. 在该挂载发布循环视频
 ffmpeg -re -stream_loop -1 -i <absolute path to local video> -f v4l2 -pix_fmt yuv420p /dev/video9
 ```
 
-With this the V4L2 stream at `dev/video9` is now active. You can have a look at it from another terminal using:
+这样 `dev/video9` 处的 V4L2 流现已激活。你可以在另一个终端中使用以下命令查看它：
 
 ```bash
 ffplay /dev/video9
 ```
 
-2. Then, on another terminal (or back to the terminal that you built VisionPilot), we can test it inside the main VisionPilot loop:
+2. 然后，在另一个终端（或回到你构建 VisionPilot 的终端），我们可以在主 VisionPilot 循环中测试它：
 
 ```bash
-# First argument `1` means starting this with V4L2 input
-# Second argument being mounted V4L2 stream
-# Third argument being desired FPS
+# 第一个参数 `1` 表示以 V4L2 输入启动
+# 第二个参数是挂载的 V4L2 流
+# 第三个参数是期望的 FPS
 ./VisionPilot 1 /dev/video9 10
 ```

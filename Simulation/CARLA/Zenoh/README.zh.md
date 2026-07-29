@@ -1,66 +1,66 @@
 # Zenoh
 
-[🇨🇳 中文版](README.zh.md)
+[🇺🇸 English](README.md)
 
-This directory provides a Zenoh-based CARLA bridge and related pipelines.
+本目录提供基于 Zenoh 的 CARLA 桥接及相关流水线。
 
-## Demo
+## 演示
 
-- CARLA + Zenoh: Vision Pipelines Demo
+- CARLA + Zenoh：Vision 流水线演示
 
 [![CARLA + Zenoh Vision Pipelines Demo](https://img.youtube.com/vi/TQ6JwexlXvo/hqdefault.jpg)](https://youtu.be/TQ6JwexlXvo "CARLA + Zenoh: Vision Pipelines Demo")
 
-## Dependencies
+## 依赖
 
-Please refer to the dependencies described in the following page:
+请参阅以下页面中描述的依赖：
 
 [VisionPilot/Middleware_Recipes/Zenoh](../../../../VisionPilot/Middleware_Recipes/Zenoh)
 
-## Usage
+## 使用方法
 
-### Setup (run once)
+### 设置（运行一次）
 
 ```sh
 just setup
 ```
 
-### Build
+### 构建
 
 ```sh
-# Build all
+# 构建全部
 export LIBTORCH_INSTALL_ROOT=/path/to/libtorch/
 export ONNXRUNTIME_ROOTDIR=/path/to/onnxruntime-linux-x64-gpu-1.22.0
 just build
-# Optional (build components separately)
+# 可选（分别构建各组件）
 just build_bridge
 just build_video_pubsub
 just build_models
 ```
 
-### Run
+### 运行
 
-#### Start CARLA server
+#### 启动 CARLA 服务器
 
 ```sh
 just run_carla
 ```
 
-Start the CARLA simulator.
+启动 CARLA 仿真器。
 
-The Docker image may take a long time to download on the first run.
+Docker 镜像首次下载可能需要较长时间。
 
-#### Start Zenoh CARLA bridge
+#### 启动 Zenoh CARLA 桥接
 
 ```sh
 just run_zenoh
 ```
 
-Start the CARLA Python agent with pygame control and also launch the Zenoh CARLA bridge.
+启动带 pygame 控制的 CARLA Python 代理，同时启动 Zenoh CARLA 桥接。
 
-#### Run pipelines
+#### 运行流水线
 
 ```sh
-# Raw camera view
+# 原始相机视图
 just run_carla_sub
 
 # SceneSeg
@@ -76,7 +76,7 @@ just run_carla_scene3d
 just run_carla_egolanes
 ```
 
-### Cleanup
+### 清理
 
 ```sh
 just clean

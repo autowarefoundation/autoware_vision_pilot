@@ -1,2 +1,3 @@
-# 规划模块
 # Planning module
+
+[🇨🇳 中文版](README.zh.md)

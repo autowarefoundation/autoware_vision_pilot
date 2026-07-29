@@ -1,2 +1,3 @@
-# 日志模块
 # Logging module
+
+[🇨🇳 中文版](README.zh.md)
