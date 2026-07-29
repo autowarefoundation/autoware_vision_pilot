@@ -83,7 +83,7 @@ int main(int argc, char** argv)
     }
 #endif
 
-    ImagePreprocessor preprocessor;
+    ImagePreprocessor preprocessor({cfg.preprocess_use_vpi});
     ve::OnnxEngine engine(cfg.engine);
     vm::InferencePipeline pipeline(engine, cfg.inference);
     Planner planner(cfg.speed_limit, cfg.Lf);

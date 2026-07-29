@@ -43,6 +43,8 @@ struct Config {
     double speed_limit;
     double Lf;
 
+    bool preprocess_use_vpi = false;  // VPI GPU warp (Jetson only, requires libvpi-dev)
+
     bool visualization_on = false;
     bool webrtc_on = false;
     int webrtc_port;
