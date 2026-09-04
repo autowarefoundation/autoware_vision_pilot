@@ -70,20 +70,8 @@ public:
     */
     std::tuple<bool, cv::Mat> get_latest_frame();
 
-
-    // /**
-    // * @brief Get latest frame with frame metadata, via timestamp and frame index
-    // *
-    // * @param frame_index Output parameter: frame sequence number from ROS2 message
-    // * @param timestamp_sec Output parameter: ROS2 timestamp in seconds
-    // * @return cv::Mat The image frame, or empty if none available
-    // *
-    // * Provides additional timing information along with the frame for synchronization purposes.
-    // */
-    // cv::Mat get_latest_frame_with_timestamp(
-    //     uint32_t &frame_index,
-    //     double &timestamp_sec
-    // );
+    // header.stamp of the frame last returned by get_latest_frame(), nanoseconds.
+    int64_t last_frame_stamp_ns() const;
 
 
     /**
@@ -154,6 +142,8 @@ private:
     // Single latest-frame slot with thread safety
     mutable std::mutex frame_mutex;
     cv::Mat latest_frame;
+    int64_t latest_stamp_ns = 0;
+    int64_t consumed_stamp_ns = 0;
     bool has_latest_frame = false;
 
     // QoS settings for subscription

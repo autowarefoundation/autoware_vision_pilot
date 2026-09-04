@@ -24,6 +24,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <camera_ros2_interface/camera_ros2_interface.hpp>
 #include <vehicle_ros2_interface/vehicle_ros2_interface.hpp>
+#include <radar_ros2_interface/radar_ros2_interface.hpp>
 #endif
 
 namespace ve = visionpilot::engine;
@@ -53,12 +54,32 @@ int main(int argc, char** argv)
     std::shared_ptr<CameraInterface> camera_interface;
     std::shared_ptr<VehicleInterface> vehicle_interface;
 #if ENABLE_ROS2_INTERFACE
+    std::shared_ptr<CameraRos2Interface> camera_ros2;
+    std::shared_ptr<RadarRos2Interface> radar_ros2;
+#endif
+    const bool radar_on = cfg.inference.long_fusion.radar_enabled;
+#if ENABLE_ROS2_INTERFACE
     rclcpp::init(argc, argv);
-    camera_interface = std::make_unique<CameraRos2Interface>(cfg.source.input_camera_topic);
+    camera_ros2 = std::make_shared<CameraRos2Interface>(cfg.source.input_camera_topic);
+    camera_interface = camera_ros2;
     vehicle_interface = std::make_shared<VehicleRos2Interface>(cfg.vehicle_speed_topic,
                                                                cfg.vehicle_steering_topic,
                                                                cfg.vehicle_acceleration_topic);
+    if (radar_on)
+    {
+        if (cfg.source.input_radar_topic.empty())
+        {
+            VP_ERROR("radar.enabled requires radar.topic");
+            return 1;
+        }
+        radar_ros2 = std::make_shared<RadarRos2Interface>(cfg.source.input_radar_topic);
+    }
 #else
+    if (radar_on)
+    {
+        VP_ERROR("radar.enabled requires a ROS2 build (ENABLE_ROS2_INTERFACE)");
+        return 1;
+    }
     if (cfg.source.mode == SourceMode::Video)
     {
         camera_interface = std::make_unique<camera_interface::FileInterface>(
@@ -117,6 +138,17 @@ int main(int argc, char** argv)
             continue;
         }
 
+        if (radar_on)
+        {
+#if ENABLE_ROS2_INTERFACE
+            std::vector<visionpilot::fusion::RadarPoint> pts;
+            for (const auto& p : radar_ros2->take_closest(
+                     camera_ros2->last_frame_stamp_ns(), cfg.source.radar_sync_slop_ms))
+                pts.push_back({p.range_m, p.azimuth_rad, p.range_rate});
+            pipeline.set_radar_points(std::move(pts));
+#endif
+        }
+
         preprocessor.preprocess(frame, warped, resized, net_size);
         cv::Size frame_size = frame.size();
         // One-time: tell the pipeline how to project AutoSteer/AutoSpeed outputs
@@ -130,11 +162,11 @@ int main(int argc, char** argv)
         // ── Default frame no inference ────────────────────────────────────────────
         cv::Mat display_frame = resized;
 
-        if (const auto r = pipeline.process(warped, resized))
+        const double ego_v = vehicle_interface->read();
+        VP_INFO("ego_speed=%.2f m/s", ego_v);
+        if (const auto r = pipeline.process(warped, resized,
+                                            static_cast<float>(ego_v), true))
         {
-            // pipeline.latency().print();
-
-            const double ego_v = vehicle_interface->read();
             const double cte = r->lateral.cte_m;
             const double epsi = r->lateral.yaw_rad;
             const double kappa = r->lateral.curvature;
@@ -176,7 +208,9 @@ int main(int argc, char** argv)
                 {
                     // annotate_frame() draws inplace
                     viz = cfg.rrd_on ? resized.clone() : resized;
-                    vd::visualize(viz, *r, source_label(cfg.source), cfg.wheel_dir, pipeline.H_world2resized());
+                    vd::visualize(viz, *r, source_label(cfg.source), cfg.wheel_dir,
+                                  pipeline.H_world2resized(),
+                                  static_cast<float>(ego_v));
                     display_frame = viz;
                 }
                 else

@@ -49,6 +49,7 @@ add_subdirectory(modules/sensing/image_preprocessing)
 if(ENABLE_ROS2_INTERFACE)
     add_subdirectory(modules/middleware_interfaces/ros2_interface/camera_ros2_interface)
     add_subdirectory(modules/middleware_interfaces/ros2_interface/vehicle_ros2_interface)
+    add_subdirectory(modules/middleware_interfaces/ros2_interface/radar_ros2_interface)
 endif()
 
 add_subdirectory(modules/engine)

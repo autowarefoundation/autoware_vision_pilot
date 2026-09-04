@@ -205,7 +205,9 @@ int main(int argc, char** argv)
             if (cfg.visualization_on)
             {
                 if (debug_viz)
-                    vd::visualize(resized, *r, source_label(cfg.source), cfg.wheel_dir, pipeline.H_world2resized());
+                    vd::visualize(resized, *r, source_label(cfg.source), cfg.wheel_dir,
+                                  pipeline.H_world2resized(),
+                                  static_cast<float>(ego_v));
                 else
                     display_frame = visualization.build_frame(resized, *r, plan, ego_v, pipeline.H_resized(), cfg.speed_limit);
             }

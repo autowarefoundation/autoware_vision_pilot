@@ -17,6 +17,8 @@ struct SourceConfig {
     bool        video_realtime = true;
     bool        video_loop     = false;
     std::string input_camera_topic   = "/camera/image";
+    std::string input_radar_topic    = "/radar/points";
+    int         radar_sync_slop_ms   = 80;
     std::string v4l2_device  = "/dev/video0";
     int         v4l2_fps     = 10;
 };

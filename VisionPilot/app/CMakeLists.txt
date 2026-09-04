@@ -15,7 +15,7 @@ if (ENABLE_ROS2_INTERFACE)
     find_package(std_msgs REQUIRED)
 
     target_link_libraries(VisionPilot PUBLIC rclcpp::rclcpp)
-    target_link_libraries(VisionPilot PRIVATE camera_ros2_interface vehicle_ros2_interface)
+    target_link_libraries(VisionPilot PRIVATE camera_ros2_interface vehicle_ros2_interface radar_ros2_interface)
     target_compile_definitions(VisionPilot PRIVATE ENABLE_ROS2_INTERFACE)
 endif ()
 
